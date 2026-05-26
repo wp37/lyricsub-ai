@@ -57,11 +57,11 @@ export async function getAvailableModels(): Promise<ModelInfo[]> {
       }
     }
     
-    // Sort: prioritize newer versions and pro over flash
+    // Sort: prioritize Flash over Pro (since Flash has a 1,000,000 TPM free tier rate limit vs only 32,000 TPM for Pro, which is required for audio files)
     return models.sort((a, b) => {
-      const aIsPro = a.name.includes('pro') ? 1 : 0;
-      const bIsPro = b.name.includes('pro') ? 1 : 0;
-      if (bIsPro !== aIsPro) return bIsPro - aIsPro;
+      const aIsFlash = a.name.includes('flash') ? 1 : 0;
+      const bIsFlash = b.name.includes('flash') ? 1 : 0;
+      if (bIsFlash !== aIsFlash) return bIsFlash - aIsFlash;
       return b.name.localeCompare(a.name);
     });
   } catch (err) {

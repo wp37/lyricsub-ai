@@ -498,7 +498,7 @@ const VizPreviewItem: React.FC<{
 });
 
 const DEFAULT_CONFIG = {
-  model: GeminiModel.V3_PRO,
+  model: GeminiModel.V3_FLASH,
   mode: ProcessingMode.SUBTITLES, // Default Mode
   aspectRatio: '16:9', // Default Aspect Ratio
   bgType: 'color',
@@ -616,10 +616,9 @@ const App: React.FC = () => {
   useEffect(() => {
     getAvailableModels().then(models => {
       setAvailableModels(models);
-      // Determine the best model for default (first string starting with gemini-2.5-pro or gemini-3.1-pro/etc - the list is already sorted to have Pro at the top)
+      // Determine the best model for default (prefer flash models because pro has extremely low free limits)
       if (models.length > 0 && !models.find(m => m.name === model)) {
-          // Find first 'pro' or just use first
-          const best = models.find(m => m.name.includes('pro')) || models[0];
+          const best = models.find(m => m.name.includes('flash')) || models[0];
           setModel(best.name);
       }
     });
@@ -1940,12 +1939,16 @@ const App: React.FC = () => {
             <select value={model} onChange={(e) => setModel(e.target.value)} className="w-full bg-slate-50 dark:bg-slate-950 p-2.5 rounded-lg text-xs font-bold outline-none cursor-pointer">
               {availableModels.length > 0 ? (
                 availableModels.map(m => (
-                  <option key={m.name} value={m.name}>{m.displayName}</option>
+                  <option key={m.name} value={m.name}>
+                    {m.name.includes('flash') 
+                      ? `${m.displayName} (Khuyên dùng - Nhanh, Không lỗi 429)` 
+                      : `${m.displayName} (Dễ lỗi 429 trên Key Free)`}
+                  </option>
                 ))
               ) : (
                 <>
-                  <option value={GeminiModel.V3_FLASH}>Gemini 3 Flash (Fast)</option>
-                  <option value={GeminiModel.V3_PRO}>Gemini 3 Pro (Accurate)</option>
+                  <option value={GeminiModel.V3_FLASH}>Gemini 3 Flash (Khuyên dùng - Nhanh, Không lỗi 429)</option>
+                  <option value={GeminiModel.V3_PRO}>Gemini 3 Pro (Dễ lỗi 429 trên Key Free)</option>
                 </>
               )}
             </select>
