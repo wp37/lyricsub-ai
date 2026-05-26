@@ -1789,7 +1789,14 @@ const App: React.FC = () => {
       if (mode === ProcessingMode.LYRICS) setResult(rawResponse);
       else {
         try {
-          const parsed = JSON.parse(rawResponse);
+          // Extremely robust extraction of JSON object from response string
+          let cleanedResponse = rawResponse.trim();
+          const firstBrace = cleanedResponse.indexOf('{');
+          const lastBrace = cleanedResponse.lastIndexOf('}');
+          if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+            cleanedResponse = cleanedResponse.substring(firstBrace, lastBrace + 1);
+          }
+          const parsed = JSON.parse(cleanedResponse);
           let segments: SubtitleSegment[] = (parsed.segments || []).map((s: any, idx: number) => ({
             ...s, index: idx + 1, start: Number(s.start), end: Number(s.end),
             text: textCase === TextCase.UPPER ? s.text.toUpperCase() : textCase === TextCase.LOWER ? s.text.toLowerCase() : s.text
