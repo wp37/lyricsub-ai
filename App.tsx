@@ -1891,6 +1891,19 @@ const App: React.FC = () => {
         
         {/* Left: Upload & Config */}
         <div className="xl:col-span-4 space-y-6">
+          {error && (
+            <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-4 flex gap-3 text-red-500 relative overflow-hidden">
+              <div className="absolute top-0 left-0 w-1 h-full bg-red-500"></div>
+              <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+              <div className="flex-1 space-y-0.5">
+                <p className="text-xs font-black uppercase tracking-wider">Có lỗi xảy ra</p>
+                <p className="text-xs opacity-95 leading-relaxed font-bold">{error}</p>
+              </div>
+              <button onClick={() => setError(null)} className="p-1 hover:bg-red-500/20 rounded-lg self-start transition-colors">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
           <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 p-4">
             <div onClick={() => !file && fileInputRef.current?.click()} className={`group relative rounded-xl p-4 transition-all border-2 border-dashed flex items-center gap-4 cursor-pointer ${file ? 'border-emerald-500/50 bg-emerald-50/10' : 'border-slate-200 dark:border-slate-800 hover:border-indigo-400'}`}>
               <input ref={fileInputRef} type="file" className="hidden" accept="audio/*" onChange={(e) => e.target.files?.[0] && processFile(e.target.files[0])} />

@@ -86,7 +86,7 @@ export async function processAudioWithGemini(
 ): Promise<string> {
   const ai = new GoogleGenAI({ apiKey: getEffectiveApiKey() });
   
-  const isPro = modelName.includes('pro');
+  const isThinkingModel = modelName.includes('thinking');
 
   // System Instruction: Cân bằng giữa "Timing" và "Content"
   const systemInstruction = mode === ProcessingMode.LYRICS 
@@ -159,7 +159,7 @@ export async function processAudioWithGemini(
       responseSchema: mode === ProcessingMode.SUBTITLES ? responseSchema : undefined,
       // Temperature 0.2: Ổn định để timing chính xác nhưng vẫn đủ linh hoạt để nghe rõ lời
       temperature: 0.2, 
-      thinkingConfig: isPro ? { thinkingBudget: 1024 } : undefined
+      thinkingConfig: isThinkingModel ? { thinkingBudget: 1024 } : undefined
     }
   });
 
