@@ -76,6 +76,7 @@ import { ProcessingMode, ExportFormat, SubtitleSegment, GeminiModel, TextCase, V
 
 import { processAudioWithGemini, getAvailableModels, ModelInfo, optimizeForSuno, getStoredApiKey, setStoredApiKey, getEffectiveApiKey } from './services/geminiService';
 import { parseSegmentsToSRT, parseSegmentsToASS, parseSRTToSegments, shiftSubtitleTime } from './utils/converters';
+import { compressAudioToMonoWav } from './utils/audioCompressor';
 import SubtitleTimeline from './components/SubtitleTimeline';
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB Limit
@@ -1743,13 +1744,8 @@ const App: React.FC = () => {
     }
     setIsProcessing(true); setError(null); setResult('');
     try {
-      const reader = new FileReader();
-      const base64Promise = new Promise<string>((resolve) => {
-        reader.onload = () => resolve((reader.result as string).split(',')[1]);
-        reader.readAsDataURL(file);
-      });
-      const base64 = await base64Promise;
-      const rawResponse = await processAudioWithGemini(base64, file.type, mode, language, duration, model, referenceLyrics);
+      const { base64, mimeType } = await compressAudioToMonoWav(file);
+      const rawResponse = await processAudioWithGemini(base64, mimeType, mode, language, duration, model, referenceLyrics);
       if (mode === ProcessingMode.LYRICS) setResult(rawResponse);
       else {
         try {
