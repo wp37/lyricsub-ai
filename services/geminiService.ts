@@ -108,8 +108,10 @@ export async function processAudioWithGemini(
        - 'start' và 'end' phải nằm trong khoảng 0 - ${duration.toFixed(2)}.
        - Ngôn ngữ: ${language}.`;
 
-  // Prompt: Thêm cơ chế "Anchor" để neo thời gian
-  const referencePrompt = referenceLyrics ? `\n\nLỜI GỐC ĐỂ ĐỐI CHIẾU (SỬ DỤNG LỜI NÀY LÀM CHUẨN, NHƯNG THỜI GIAN PHẢI LẤY TỪ AUDIO):\n${referenceLyrics}` : "";
+  // Prompt: Thêm cơ chế "Anchor" để neo thời gian và đảm bảo trích xuất trọn vẹn
+  const referencePrompt = referenceLyrics 
+    ? `\n\nLỜI GỐC ĐỂ ĐỐI CHIẾU (BẮT BUỘC: Bạn phải căn chỉnh thời gian cho TOÀN BỘ lời gốc dưới đây từ đầu đến cuối bài, không được phép cắt xén, bỏ bớt hay dừng lại nửa chừng):\n${referenceLyrics}` 
+    : "";
 
   const prompt = mode === ProcessingMode.LYRICS
     ? `Trích xuất lời bài hát cho file audio này. Ngôn ngữ: ${language}. Độ dài: ${Math.floor(duration)}s.${referencePrompt}`
@@ -159,6 +161,7 @@ export async function processAudioWithGemini(
       responseSchema: mode === ProcessingMode.SUBTITLES ? responseSchema : undefined,
       // Temperature 0.2: Ổn định để timing chính xác nhưng vẫn đủ linh hoạt để nghe rõ lời
       temperature: 0.2, 
+      maxOutputTokens: 8192,
       thinkingConfig: isThinkingModel ? { thinkingBudget: 1024 } : undefined
     }
   });
