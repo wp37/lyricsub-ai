@@ -1,0 +1,8 @@
+{
+  "name": "Remix: VIDEO SUBTITLE GENERATION 2.5.1",
+  "description": " Bản Free HOÀN TOÀN, không mục đích thương mại của fb https://www.facebook.com/hoangtuan.hp kết hợp cùng https://www.facebook.com/NguyennkAIMusic. \n\nVersion 1.0\n- Tự động làm karaoke dựa vào file nhạc, xuất file chuẩn srt\n- Tự động xuất video mp4 karaoke\n- Hình nền tự chọn\n- Sóng nhạc nhiều thể loại, kích tước, màu sắc\n- Font chữ , kích thước, màu sắc\n- Vị trí subtitle\nVersion 2.0\n- Tối ưu xuất HD 720\nVersion 2.1\n- Chạy ảnh\nVersion 2.2\n- Xuất HD 1080\nVersion 2.4\n- Thêm tùy chọn không chạy sóng nhạc",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": []
+}
