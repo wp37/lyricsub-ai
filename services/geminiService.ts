@@ -37,9 +37,19 @@ export async function getAvailableModels(): Promise<ModelInfo[]> {
     const models: ModelInfo[] = [];
 
     // The genai sdk list() returns an async iterable
+    const excludePatterns = [
+      'vision', 'experimental', 'embedding', 'robotics', 'tts',
+      'nano', 'custom-tools', 'live', 'lite', 'imagen', 'learnlm',
+      'bisheng', 'aqa'
+    ];
+
     for await (const m of modelsResponse) {
-      if (m.name.includes('gemini') && !m.name.includes('vision') && !m.name.includes('experimental')) {
-         // Filter for useful text/audio gemini models
+      const name = m.name.toLowerCase();
+      if (
+        name.includes('gemini') &&
+        !excludePatterns.some(p => name.includes(p)) &&
+        (name.includes('pro') || name.includes('flash'))
+      ) {
          models.push({
            name: m.name.replace('models/', ''),
            displayName: m.displayName || m.name.replace('models/', '')
@@ -47,8 +57,13 @@ export async function getAvailableModels(): Promise<ModelInfo[]> {
       }
     }
     
-    // Sort so pro is usually higher or preferred
-    return models.sort((a, b) => b.name.localeCompare(a.name));
+    // Sort: prioritize newer versions and pro over flash
+    return models.sort((a, b) => {
+      const aIsPro = a.name.includes('pro') ? 1 : 0;
+      const bIsPro = b.name.includes('pro') ? 1 : 0;
+      if (bIsPro !== aIsPro) return bIsPro - aIsPro;
+      return b.name.localeCompare(a.name);
+    });
   } catch (err) {
     console.error("Error fetching models, returning defaults:", err);
     return [
