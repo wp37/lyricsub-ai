@@ -568,6 +568,22 @@ const App: React.FC = () => {
   // --- State ---
   const [isDark, setIsDark] = useState(() => document.documentElement.classList.contains('dark'));
   const [showApiKeyDialog, setShowApiKeyDialog] = useState(false);
+  const [autoSelectModel, setAutoSelectModel] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('lyricsub_auto_select_model');
+      return saved !== 'false';
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('lyricsub_auto_select_model', String(autoSelectModel));
+    } catch (e) {
+      console.error(e);
+    }
+  }, [autoSelectModel]);
   const [apiKeyInput, setApiKeyInput] = useState(() => getStoredApiKey());
   const [hasApiKey, setHasApiKey] = useState(() => !!getEffectiveApiKey());
   const [file, setFile] = useState<File | null>(null);
@@ -1547,19 +1563,27 @@ const App: React.FC = () => {
         const canvasStream = canvasRef.current.captureStream(0); // 0 FPS = Manual capture mode, vital for background export
         const combinedStream = new MediaStream([...canvasStream.getVideoTracks(), ...dest.stream.getAudioTracks()]);
         
-        const mimeTypes = ['video/webm;codecs=h264', 'video/webm;codecs=vp8', 'video/webm'];
+        const mimeTypes = [
+          'video/mp4;codecs=h264',
+          'video/mp4',
+          'video/webm;codecs=h264',
+          'video/webm;codecs=vp8',
+          'video/webm'
+        ];
         const selectedMime = mimeTypes.find(type => MediaRecorder.isTypeSupported(type)) || 'video/webm';
+        const isMp4 = selectedMime.includes('mp4');
+        const ext = isMp4 ? '.mp4' : '.webm';
         const bitrate = quality === '1080p' ? 8000000 : 4000000; // Higher bitrate for offline
         
         const recorder = new MediaRecorder(combinedStream, { mimeType: selectedMime, videoBitsPerSecond: bitrate });
         const chunks: Blob[] = [];
         recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
         recorder.onstop = () => {
-            const blob = new Blob(chunks, { type: 'video/webm' });
+            const blob = new Blob(chunks, { type: isMp4 ? 'video/mp4' : 'video/webm' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `${file?.name.split('.')[0] || 'karaoke'}_${quality}.webm`;
+            a.download = `${file?.name.split('.')[0] || 'karaoke'}_${quality}${ext}`;
             a.click();
             URL.revokeObjectURL(url);
             setIsExporting(false);
@@ -1638,20 +1662,29 @@ const App: React.FC = () => {
     const canvasStream = canvasRef.current.captureStream(30);
     const audioStream = audioDestRef.current.stream;
     const combinedStream = new MediaStream([...canvasStream.getVideoTracks(), ...audioStream.getAudioTracks()]);
-    const mimeTypes = ['video/webm;codecs=h264', 'video/webm;codecs=vp8', 'video/webm'];
+    const mimeTypes = [
+      'video/mp4;codecs=h264',
+      'video/mp4',
+      'video/webm;codecs=h264',
+      'video/webm;codecs=vp8',
+      'video/webm'
+    ];
     const selectedMime = mimeTypes.find(type => MediaRecorder.isTypeSupported(type)) || 'video/webm';
+    const isMp4 = selectedMime.includes('mp4');
+    const ext = isMp4 ? '.mp4' : '.webm';
     const bitrate = quality === '1080p' ? 6000000 : 2500000;
 
     const recorder = new MediaRecorder(combinedStream, { mimeType: selectedMime, videoBitsPerSecond: bitrate });
     recorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunksRef.current.push(e.data); };
     recorder.onstop = () => {
-      const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
+      const blob = new Blob(recordedChunksRef.current, { type: isMp4 ? 'video/mp4' : 'video/webm' });
       const url = URL.createObjectURL(blob as Blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${file?.name.split('.')[0] || 'lyricsub'}_${quality}.webm`; 
+      a.download = `${file ? file.name.split('.')[0] : 'karaoke'}_recorded${ext}`;
       a.click();
       URL.revokeObjectURL(url);
+      setIsRecording(false);
     };
     recorder.start(1000);
     mediaRecorderRef.current = recorder;
@@ -1744,7 +1777,15 @@ const App: React.FC = () => {
     setIsProcessing(true); setError(null); setResult('');
     try {
       const { base64, mimeType } = await compressAudioToMonoWav(file);
-      const rawResponse = await processAudioWithGemini(base64, mimeType, mode, language, duration, model, referenceLyrics);
+      let activeModel = model;
+      if (autoSelectModel) {
+        if (availableModels.length > 0) {
+          activeModel = availableModels[0].name;
+        } else {
+          activeModel = 'gemini-2.5-flash';
+        }
+      }
+      const rawResponse = await processAudioWithGemini(base64, mimeType, mode, language, duration, activeModel, referenceLyrics);
       if (mode === ProcessingMode.LYRICS) setResult(rawResponse);
       else {
         try {
@@ -1935,23 +1976,41 @@ const App: React.FC = () => {
           </div>
 
           <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-5 space-y-4">
-            {/* HIDDEN MODE SELECTOR - DEFAULT SUBTITLES */}
-            <select value={model} onChange={(e) => setModel(e.target.value)} className="w-full bg-slate-50 dark:bg-slate-950 p-2.5 rounded-lg text-xs font-bold outline-none cursor-pointer">
-              {availableModels.length > 0 ? (
-                availableModels.map(m => (
-                  <option key={m.name} value={m.name}>
-                    {m.name.includes('flash') 
-                      ? `${m.displayName} (Khuyên dùng - Nhanh, Không lỗi 429)` 
-                      : `${m.displayName} (Dễ lỗi 429 trên Key Free)`}
-                  </option>
-                ))
-              ) : (
-                <>
-                  <option value={GeminiModel.V3_FLASH}>Gemini 3 Flash (Khuyên dùng - Nhanh, Không lỗi 429)</option>
-                  <option value={GeminiModel.V3_PRO}>Gemini 3 Pro (Dễ lỗi 429 trên Key Free)</option>
-                </>
-              )}
-            </select>
+            <label className="flex items-center gap-2.5 cursor-pointer select-none">
+              <input 
+                type="checkbox" 
+                checked={autoSelectModel} 
+                onChange={(e) => setAutoSelectModel(e.target.checked)} 
+                className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 accent-indigo-500 cursor-pointer"
+              />
+              <div className="flex-1">
+                <p className="text-xs font-black uppercase tracking-wider text-slate-700 dark:text-slate-300">Tự động chọn mô hình tối ưu</p>
+                <p className="text-[10px] text-slate-400 font-bold uppercase">Khuyên dùng cho Key Free (Tránh lỗi 429)</p>
+              </div>
+            </label>
+
+            {!autoSelectModel && (
+              <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-1.5 animate-fadeIn">
+                <p className="text-[9px] font-black uppercase tracking-wider text-slate-400">Chọn mô hình thủ công:</p>
+                <select value={model} onChange={(e) => setModel(e.target.value)} className="w-full bg-slate-50 dark:bg-slate-950 p-2.5 rounded-lg text-xs font-bold outline-none cursor-pointer border border-slate-200 dark:border-slate-800">
+                  {availableModels.length > 0 ? (
+                    availableModels.map(m => (
+                      <option key={m.name} value={m.name}>
+                        {m.name.includes('flash') 
+                          ? `${m.displayName} (Nhanh, Tránh 429)` 
+                          : `${m.displayName} (Dễ lỗi 429 trên Key Free)`}
+                      </option>
+                    ))
+                  ) : (
+                    <>
+                      <option value={GeminiModel.V3_FLASH}>Gemini 3 Flash (Nhanh, Tránh 429)</option>
+                      <option value={GeminiModel.V3_PRO}>Gemini 3 Pro (Dễ lỗi 429 trên Key Free)</option>
+                    </>
+                  )}
+                </select>
+              </div>
+            )}
+            
             <button onClick={handleProcess} disabled={isProcessing || !file}
               className="w-full py-3 rounded-xl font-black text-xs uppercase tracking-widest bg-indigo-600 text-white flex items-center justify-center gap-2 disabled:opacity-50 hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-600/20"
             >
@@ -2609,11 +2668,11 @@ const App: React.FC = () => {
                                 </div>
                             ) : (
                                 <>
-                                    <button onClick={() => handleOfflineExport('720p')} className="px-4 py-2 rounded-xl text-[10px] font-black uppercase flex items-center gap-2 transition-all shadow-md active:scale-95 bg-slate-800 text-white hover:bg-slate-700">
-                                        <Video className="w-4 h-4" /> Xuất 720p
+                                    <button onClick={() => handleOfflineExport('720p')} className="px-4 py-2 rounded-xl text-[10px] font-black uppercase flex items-center gap-2 transition-all shadow-md active:scale-95 bg-slate-800 text-white hover:bg-slate-700" title="Xuất video chất lượng HD dạng MP4/WebM">
+                                        <Video className="w-4 h-4" /> Xuất MP4 (720p)
                                     </button>
-                                    <button onClick={() => handleOfflineExport('1080p')} className="px-4 py-2 rounded-xl text-[10px] font-black uppercase flex items-center gap-2 transition-all shadow-md active:scale-95 bg-indigo-600 text-white hover:bg-indigo-700">
-                                        <Highlighter className="w-4 h-4" /> Xuất 1080p
+                                    <button onClick={() => handleOfflineExport('1080p')} className="px-4 py-2 rounded-xl text-[10px] font-black uppercase flex items-center gap-2 transition-all shadow-md active:scale-95 bg-indigo-600 text-white hover:bg-indigo-700" title="Xuất video chất lượng Full HD dạng MP4/WebM">
+                                        <Highlighter className="w-4 h-4" /> Xuất MP4 (1080p)
                                     </button>
                                 </>
                             )}
@@ -2641,6 +2700,15 @@ const App: React.FC = () => {
                         </button>
                         </div>
                     </div>
+                  </div>
+
+                  {/* CapCut MP4 Guide */}
+                  <div className="bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 p-4 rounded-2xl mb-4 flex items-start gap-2.5 text-[11px] leading-relaxed">
+                      <Sparkles className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
+                      <div>
+                          <p className="font-bold">💡 Định dạng MP4/WebM tối ưu cho CapCut:</p>
+                          <p className="opacity-90">Video xuất ra có màu nền hoặc trong suốt. Bạn có thể kéo thả trực tiếp file tải về vào CapCut trên PC/Mac/Điện thoại để lồng ghép nền và chỉnh sửa cực kỳ dễ dàng!</p>
+                      </div>
                   </div>
 
                   {/* PLAYER CONTAINER: Aspect Ratio enforced via JS/Tailwind */}
@@ -3017,6 +3085,33 @@ const App: React.FC = () => {
                       <div className="space-y-1">
                         <span className="font-mono font-bold text-indigo-500 bg-white dark:bg-slate-950 px-1 py-0.5 rounded border border-slate-200 dark:border-slate-800 inline-block">[Outro]</span>
                         <p className="text-slate-400">Nhạc nhỏ dần và tắt dứt khoát kết thúc bài.</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Suno/YT Copyright Accordion */}
+                  <div className="bg-slate-100/50 dark:bg-slate-900/50 p-5 rounded-2xl border border-slate-200/60 dark:border-slate-800/80 space-y-4 mt-6">
+                    <h3 className="text-xs font-black uppercase text-emerald-600 dark:text-emerald-400 tracking-wider flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-emerald-500 animate-pulse" /> Cẩm nang sáng tạo & lách bản quyền Suno AI / YouTube 🛡️
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                      <div className="bg-white dark:bg-slate-950 p-4 rounded-xl border border-slate-200 dark:border-slate-850 space-y-2">
+                        <p className="font-bold text-indigo-500 flex items-center gap-1.5">1. Cách viết Style không dính gậy</p>
+                        <p className="text-[11px] text-slate-500 leading-relaxed">
+                          Suno cấm nhập tên ca sĩ hoặc ban nhạc thật. Để tạo nhạc cực chất, bạn hãy mô tả phong cách bằng các từ khóa nhạc lý: nhạc cụ chính, nhịp độ bpm, chất giọng (ví dụ: <code className="bg-slate-100 dark:bg-slate-800 px-1 py-0.5 rounded font-mono text-[9px]">90bpm, synthwave pop, melodic warm female vocals, stereo panning acoustic guitars</code>).
+                        </p>
+                      </div>
+                      <div className="bg-white dark:bg-slate-950 p-4 rounded-xl border border-slate-200 dark:border-slate-850 space-y-2">
+                        <p className="font-bold text-indigo-500 flex items-center gap-1.5">2. Kỹ thuật Chế lời (Parody Lyrics)</p>
+                        <p className="text-[11px] text-slate-500 leading-relaxed">
+                          Muốn biến bài hát quen thuộc thành bản cover chế của riêng bạn? Hãy giữ nguyên nhịp điệu (số từ trên mỗi câu) của bài gốc, nhưng thay đổi từ khóa chính, đổi bối cảnh câu chuyện. AI sẽ tự động phân tách cấu trúc <code className="bg-slate-100 dark:bg-slate-800 px-1 py-0.5 rounded font-mono text-[9px]">[Verse]</code>, <code className="bg-slate-100 dark:bg-slate-800 px-1 py-0.5 rounded font-mono text-[9px]">[Chorus]</code> để Suno bắt beat hoàn hảo.
+                        </p>
+                      </div>
+                      <div className="bg-white dark:bg-slate-950 p-4 rounded-xl border border-slate-200 dark:border-slate-850 space-y-2">
+                        <p className="font-bold text-indigo-500 flex items-center gap-1.5">3. Cover dòng nhạc khác để lách YT</p>
+                        <p className="text-[11px] text-slate-500 leading-relaxed">
+                          Để tránh bị Content ID của YouTube quét bản quyền bài gốc, bạn hãy phối khí lại bài hát đó sang một thể loại hoàn toàn khác lạ (ví dụ: Chuyển một bản Pop ballad buồn sang phong cách Retro 80s Synthwave sôi động, Lofi Jazz êm dịu, hay Rock bùng nổ). Điều này tạo ra bản phối độc nhất!
+                        </p>
                       </div>
                     </div>
                   </div>
