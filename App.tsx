@@ -1,11 +1,7 @@
 
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { 
-  FileAudio, 
   Upload, 
-  Settings, 
-  PlayCircle, 
-  PauseCircle, 
   Download, 
   FileText, 
   Loader2, 
@@ -19,17 +15,11 @@ import {
   Copy,
   Trash2,
   Clock,
-  Gauge,
-  Volume2,
   Activity,
   RefreshCw,
-  FileMusic,
   Edit3,
-  ALargeSmall,
-  MonitorPlay,
   Palette,
   Image as ImageIcon,
-  Waves,
   Sparkles,
   Maximize2,
   Minimize2,
@@ -39,7 +29,6 @@ import {
   Key,
   BookOpen,
   LayoutGrid,
-  Type,
   Video,
   StopCircle,
   Film,
@@ -49,11 +38,9 @@ import {
   ArrowRightLeft,
   Layers,
   Stamp,
-  Mic2,
   Highlighter,
   Move,
   Scaling,
-  MousePointer2,
   MoveVertical,
   AlignLeft,
   User,
@@ -71,13 +58,14 @@ import {
   SkipBack,
   SkipForward
 } from 'lucide-react';
-  // ... (previous imports)
-import { ProcessingMode, ExportFormat, SubtitleSegment, GeminiModel, TextCase, VisualizerStyle, VizColorMode, SubtitlePosition, TransitionEffect, CornerPosition, IntroAnimation, TextAlign, WordTiming } from './types';
+import { ProcessingMode, ExportFormat, SubtitleSegment, GeminiModel, TextCase, VisualizerStyle, VizColorMode, SubtitlePosition, TransitionEffect, CornerPosition, IntroAnimation, TextAlign, WordTiming, DisplayMode } from './types';
 
-import { processAudioWithGemini, getAvailableModels, ModelInfo, optimizeForSuno, getStoredApiKey, setStoredApiKey, getEffectiveApiKey } from './services/geminiService';
-import { parseSegmentsToSRT, parseSegmentsToASS, parseSRTToSegments, shiftSubtitleTime } from './utils/converters';
+import { processAudioWithGemini, getAvailableModels, ModelInfo, optimizeForSuno, getStoredApiKey, setStoredApiKey, getEffectiveApiKey, refineTimingWithGemini } from './services/geminiService';
+import { parseSegmentsToSRT, parseSegmentsToASS, parseSRTToSegments, shiftSubtitleTime, parseSegmentsToKaraokeASS, parseSegmentsToLRC, parseSegmentsToPlainLyrics } from './utils/converters';
 import { compressAudioToMonoWav } from './utils/audioCompressor';
 import SubtitleTimeline from './components/SubtitleTimeline';
+import { runPostProcessing, autoSplitToWords } from './utils/timingPostProcessor';
+import { extractWaveform, detectEnergyPeaks, WaveformData } from './utils/audioAnalyzer';
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB Limit
 const SLIDE_DURATION = 10; // 10 seconds per slide
@@ -98,6 +86,54 @@ const FONTS = [
   { name: 'Serif Bold', value: 'serif' },
   { name: 'Monospace', value: 'monospace' }
 ];
+
+// ===== TEXT RENDERING UTILITIES (Word Wrap + Auto Scale) =====
+
+/**
+ * Wrap text into multiple lines that fit within maxWidth
+ * Returns array of line strings
+ */
+function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  const words = text.split(' ');
+  const lines: string[] = [];
+  let currentLine = '';
+  
+  for (const word of words) {
+    const testLine = currentLine ? `${currentLine} ${word}` : word;
+    if (ctx.measureText(testLine).width > maxWidth && currentLine) {
+      lines.push(currentLine);
+      currentLine = word;
+    } else {
+      currentLine = testLine;
+    }
+  }
+  if (currentLine) lines.push(currentLine);
+  return lines.length > 0 ? lines : [text];
+}
+
+/**
+ * Auto-scale font size so text fits within maxWidth
+ * Returns the adjusted font size (min 50% of baseSize)
+ */
+function autoScaleFont(
+  ctx: CanvasRenderingContext2D, 
+  text: string, 
+  maxWidth: number, 
+  baseSize: number, 
+  fontFamily: string,
+  fontWeight: string = '900'
+): number {
+  let size = baseSize;
+  const minSize = Math.max(24, baseSize * 0.5);
+  ctx.font = `${fontWeight} ${size}px ${fontFamily}`;
+  
+  while (ctx.measureText(text).width > maxWidth && size > minSize) {
+    size -= 2;
+    ctx.font = `${fontWeight} ${size}px ${fontFamily}`;
+  }
+  return size;
+}
+
 
 // Helper to draw a specific visualizer frame
 const renderVisualizerFrame = (
@@ -526,6 +562,7 @@ const DEFAULT_CONFIG = {
   subColor1: '#ffffff',
   subColor2: '#df9c10', // Radiant gold
   isKaraoke: true, // Default Karaoke ON
+  displayMode: DisplayMode.KARAOKE, // Default Display Mode
   karaokeColor: '#df9c10', // Luxurious gold fills
   karaokeBorderColor: '#ffffff',
   textCase: TextCase.NORMAL,
@@ -673,6 +710,10 @@ const App: React.FC = () => {
   const [subColor1, setSubColor1] = useState(initialSettings.subColor1);
   const [subColor2, setSubColor2] = useState(initialSettings.subColor2);
   const [isKaraoke, setIsKaraoke] = useState(initialSettings.isKaraoke);
+  const [displayMode, setDisplayMode] = useState<DisplayMode>(() => {
+    if (initialSettings.displayMode) return initialSettings.displayMode;
+    return initialSettings.isKaraoke === false ? DisplayMode.TEXT_OVERLAY : DisplayMode.KARAOKE;
+  });
   const [karaokeColor, setKaraokeColor] = useState(initialSettings.karaokeColor);
   const [karaokeBorderColor, setKaraokeBorderColor] = useState(initialSettings.karaokeBorderColor ?? '#ffffff');
 
@@ -708,6 +749,16 @@ const App: React.FC = () => {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
 
+  // ===== NEW: Module states =====
+  const [enableMultiPass, setEnableMultiPass] = useState<boolean>(false);
+  const [refinementStatus, setRefinementStatus] = useState<string>('');
+  const [enablePostProcess, setEnablePostProcess] = useState<boolean>(true);
+  const [enableWordLevel, setEnableWordLevel] = useState<boolean>(true);
+  const [waveformData, setWaveformData] = useState<WaveformData | null>(null);
+  const [isAnalyzingAudio, setIsAnalyzingAudio] = useState<boolean>(false);
+  const [enableAutoSnap, setEnableAutoSnap] = useState<boolean>(true);
+  const audioBase64CacheRef = useRef<{base64: string; mimeType: string} | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const bgInputRef = useRef<HTMLInputElement>(null);
   const bgVideoInputRef = useRef<HTMLInputElement>(null);
@@ -734,14 +785,14 @@ const App: React.FC = () => {
       vizStyle, vizAmplitude, vizColorMode, vizColor1, vizColor2, 
       vizIsFullWidth, vizPosX, vizPosY, vizScale,
       subFont, subSize, subPos, subOffset, subColorMode, subColor1, subColor2,
-      isKaraoke, karaokeColor, karaokeBorderColor,
+      isKaraoke, displayMode, karaokeColor, karaokeBorderColor,
       preShowTime, line1Align, line2Align, lineGap, // Add new settings
       introDuration, introPos, introAnimIn, introAnimOut,
       titleFont, titleSize, titleColorMode, titleColor1, titleColor2,
       artistFont, artistSize, artistColorMode, artistColor1, artistColor2
     };
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-  }, [model, mode, textCase, aspectRatio, bgType, bgColor, bgImageOpacity, transitionEffect, iconPos, iconSize, vizStyle, vizAmplitude, vizColorMode, vizColor1, vizColor2, vizIsFullWidth, vizPosX, vizPosY, vizScale, subFont, subSize, subPos, subOffset, subColorMode, subColor1, subColor2, isKaraoke, karaokeColor, karaokeBorderColor, preShowTime, line1Align, line2Align, lineGap, introDuration, introPos, introAnimIn, introAnimOut, titleFont, titleSize, titleColorMode, titleColor1, titleColor2, artistFont, artistSize, artistColorMode, artistColor1, artistColor2]);
+  }, [model, mode, textCase, aspectRatio, bgType, bgColor, bgImageOpacity, transitionEffect, iconPos, iconSize, vizStyle, vizAmplitude, vizColorMode, vizColor1, vizColor2, vizIsFullWidth, vizPosX, vizPosY, vizScale, subFont, subSize, subPos, subOffset, subColorMode, subColor1, subColor2, isKaraoke, displayMode, karaokeColor, karaokeBorderColor, preShowTime, line1Align, line2Align, lineGap, introDuration, introPos, introAnimIn, introAnimOut, titleFont, titleSize, titleColorMode, titleColor1, titleColor2, artistFont, artistSize, artistColorMode, artistColor1, artistColor2]);
 
   // Load Images
   useEffect(() => {
@@ -780,6 +831,21 @@ const App: React.FC = () => {
         requestAnimationFrame(draw);
     }
   }, [parsedSegments, isPlaying, isRecording]);
+
+  // Auto-scroll lyrics panel to active segment
+  useEffect(() => {
+    if (!isPlaying || parsedSegments.length === 0) return;
+    const activeIdx = parsedSegments.findIndex(s => currentTime >= s.start && currentTime <= s.end);
+    if (activeIdx >= 0) {
+      const el = document.getElementById(`lyric-line-${activeIdx}`);
+      const container = document.getElementById('lyrics-panel-scroll');
+      if (el && container) {
+        const elTop = el.offsetTop - container.offsetTop;
+        const targetScroll = elTop - container.clientHeight / 2 + el.clientHeight / 2;
+        container.scrollTo({ top: targetScroll, behavior: 'smooth' });
+      }
+    }
+  }, [Math.floor(currentTime), isPlaying, parsedSegments]);
 
   useEffect(() => {
     if (isDark) {
@@ -853,7 +919,7 @@ const App: React.FC = () => {
       player.removeEventListener('ended', onEnded);
       cancelAnimationFrame(animationFrameRef.current);
     };
-  }, [playbackSpeed, audioUrl, isPlaying, isRecording, vizStyle, vizAmplitude, vizColorMode, vizColor1, vizColor2, vizIsFullWidth, vizPosX, vizPosY, vizScale, subFont, subSize, subPos, subOffset, subColorMode, subColor1, subColor2, bgType, bgColor, bgImageOpacity, transitionEffect, iconPos, iconSize, isKaraoke, karaokeColor, karaokeBorderColor, introDuration, introPos, introAnimIn, introAnimOut, songTitle, artistName, titleFont, titleSize, titleColorMode, titleColor1, titleColor2, artistFont, artistSize, artistColorMode, artistColor1, artistColor2, aspectRatio]);
+  }, [playbackSpeed, audioUrl, isPlaying, isRecording, vizStyle, vizAmplitude, vizColorMode, vizColor1, vizColor2, vizIsFullWidth, vizPosX, vizPosY, vizScale, subFont, subSize, subPos, subOffset, subColorMode, subColor1, subColor2, bgType, bgColor, bgImageOpacity, transitionEffect, iconPos, iconSize, isKaraoke, displayMode, karaokeColor, karaokeBorderColor, introDuration, introPos, introAnimIn, introAnimOut, songTitle, artistName, titleFont, titleSize, titleColorMode, titleColor1, titleColor2, artistFont, artistSize, artistColorMode, artistColor1, artistColor2, aspectRatio]);
 
   // Main Draw Function
   const draw = useCallback((overrideTime?: number, overrideAnalyser?: AnalyserNode) => {
@@ -1059,150 +1125,450 @@ const App: React.FC = () => {
     }
 
     // 4. Subtitles
-    if (audioPlayerRef.current) {
-        // Find visible segments (including pre-show time)
-        const visibleSegments = parsedSegmentsRef.current.filter(s => 
-            t >= (s.start - preShowTime) && t <= (s.end + 0.5)
-        );
-
-        visibleSegments.forEach((segment) => {
-             // Determine Line Number (1 or 2)
-             let lineNum = segment.lineNumber;
-             if (!lineNum) {
-                 // Auto-assign based on index in the full list
-                 const segIndex = parsedSegmentsRef.current.indexOf(segment);
-                 lineNum = (segIndex % 2) === 0 ? 1 : 2; 
+    if (audioPlayerRef.current && parsedSegmentsRef.current.length > 0) {
+      if (displayMode === DisplayMode.TELEPROMPTER) {
+         // --- TELEPROMPTER MODE (Smooth Spotify-style Vertical Scrolling) ---
+         const allSegments = parsedSegmentsRef.current;
+         let activeIdx = allSegments.findIndex(s => t >= s.start && t <= s.end);
+         if (activeIdx === -1) {
+             activeIdx = allSegments.findIndex(s => t < s.start);
+             if (activeIdx === -1) {
+                 activeIdx = allSegments.length - 1;
              }
+         }
 
-             // Calculate Base Position
-             let baseX = canvas.width / 2;
-             let baseY = canvas.height / 2;
-             let align: CanvasTextAlign = 'center';
+         const centerY = canvas.height / 2 + subOffset;
+         const lineSpacing = subSize * lineGap;
 
-             // Horizontal Alignment
-             const currentAlign = lineNum === 1 ? line1Align : line2Align;
-             if (currentAlign === TextAlign.LEFT) {
-                 baseX = canvas.width * 0.1;
-                 align = 'left';
-             } else if (currentAlign === TextAlign.RIGHT) {
-                 baseX = canvas.width * 0.9;
-                 align = 'right';
+         let scrollProgress = 0;
+         if (activeIdx < allSegments.length - 1) {
+             const nextSeg = allSegments[activeIdx + 1];
+             const transitionWindow = 0.6; // 600ms transition window
+             const transitionStart = nextSeg.start - transitionWindow;
+             if (t >= transitionStart && t <= nextSeg.start) {
+                 scrollProgress = (t - transitionStart) / transitionWindow;
+             } else if (t > nextSeg.start) {
+                 scrollProgress = 1;
              }
+         }
+         const currentScrollIndex = activeIdx + scrollProgress;
 
-             // Vertical Position
-             // subPos defines the anchor position
-             if (subPos.includes('top')) baseY = canvas.height * 0.1 + subOffset;
-             else if (subPos.includes('bottom')) baseY = canvas.height * 0.9 - subOffset;
-             else baseY = canvas.height / 2 + subOffset;
+         const startIdx = Math.max(0, activeIdx - 6);
+         const endIdx = Math.min(allSegments.length - 1, activeIdx + 6);
 
-             // Apply Line Gap Offset
-             // Line 2 is pushed down by lineGap * fontSize
-             if (lineNum === 2) {
-                 baseY += (subSize * lineGap);
-             }
+         const maxTextWidth = canvas.width * 0.85; // Max 85% of canvas width
+
+         for (let i = startIdx; i <= endIdx; i++) {
+             const segment = allSegments[i];
+             const y = centerY + (i - currentScrollIndex) * lineSpacing;
+
+             const distFromCenter = Math.abs(i - currentScrollIndex);
+             const opacity = Math.max(0, 1 - distFromCenter * 0.22);
+
+             const scale = Math.max(0.7, 1 - distFromCenter * 0.1);
+             const currentSize = subSize * scale;
 
              ctx.save();
-             ctx.font = `900 ${subSize}px ${subFont.split(',')[0]}`;
-             ctx.textAlign = align;
+             // Auto-scale font if text is too wide
+             const fontFamily = subFont.split(',')[0];
+             const actualSize = autoScaleFont(ctx, segment.text, maxTextWidth, currentSize, fontFamily, '900');
+             ctx.font = `900 ${actualSize}px ${fontFamily}`;
+             ctx.textAlign = 'center';
              ctx.textBaseline = 'middle';
+             ctx.globalAlpha = opacity;
 
-             // Measure Total Width for calculations
+             // Wrap text if still too wide after scaling
+             const wrappedLines = wrapText(ctx, segment.text, maxTextWidth);
+             const lineH = actualSize * 1.2;
+
              const totalWidth = ctx.measureText(segment.text).width;
-             
-             // Calculate Start X (left edge of text) based on alignment
-             let startX = baseX;
-             if (align === 'center') startX = baseX - totalWidth / 2;
-             else if (align === 'right') startX = baseX - totalWidth;
+             const baseX = canvas.width / 2;
+             const startX = baseX - totalWidth / 2;
 
-             // Prepare Fill Style
              let fillStyle: string | CanvasGradient;
-             if (subColorMode === VizColorMode.SINGLE) {
-                 fillStyle = subColor1;
+             const isActive = (i === activeIdx);
+
+             if (isActive) {
+                 ctx.shadowColor = karaokeColor;
+                 ctx.shadowBlur = 15;
+                 fillStyle = karaokeColor;
              } else {
-                 const grad = ctx.createLinearGradient(startX, 0, startX + totalWidth, 0);
-                 if (subColorMode === VizColorMode.GRADIENT) {
-                     grad.addColorStop(0, subColor1);
-                     grad.addColorStop(1, subColor2);
-                 } else {
-                     grad.addColorStop(0, '#ff0000'); grad.addColorStop(0.2, '#ffff00'); grad.addColorStop(0.4, '#00ff00'); 
-                     grad.addColorStop(0.6, '#00ffff'); grad.addColorStop(0.8, '#0000ff'); grad.addColorStop(1, '#ff00ff');
-                 }
-                 fillStyle = grad;
+                 ctx.shadowBlur = 0;
+                 fillStyle = 'rgba(255, 255, 255, 0.7)';
              }
 
-             // Draw Base Text (Inactive/Background)
-             ctx.lineJoin = 'round';
-             ctx.lineWidth = subSize * 0.1; // Stroke width relative to font size
-             ctx.strokeStyle = 'black';
-             ctx.shadowColor = 'rgba(0,0,0,0.5)';
-             ctx.shadowBlur = 4;
-             ctx.strokeText(segment.text, baseX, baseY);
-             
-             ctx.fillStyle = fillStyle;
-             ctx.fillText(segment.text, baseX, baseY);
+             // Draw each wrapped line
+             const linesStartY = y - ((wrappedLines.length - 1) * lineH) / 2;
+             wrappedLines.forEach((line, lineIdx) => {
+                 const ly = linesStartY + lineIdx * lineH;
+                 
+                 // Base Text Stroke
+                 ctx.lineJoin = 'round';
+                 ctx.lineWidth = actualSize * 0.1;
+                 ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
+                 ctx.strokeText(line, baseX, ly);
 
-             // Draw Karaoke Overlay
-             if (isKaraoke) {
+                 // Fill Text
+                 ctx.fillStyle = fillStyle;
+                 ctx.fillText(line, baseX, ly);
+             });
+
+             // Karaoke word-level highlight overlay for active segment
+             if (isActive) {
                  ctx.save();
                  ctx.beginPath();
-                 
-                 if (segment.words && segment.words.length > 0) {
-                     // Word-level Karaoke (Smoother continuous filling across spaces)
-                     let charIndex = 0;
-                     let accumulatedTime = 0; // ms
-                     let totalFillPx = 0;
 
+                 const easeInOutCubic = (x: number): number => {
+                   return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+                 };
+
+                 let totalFillPx = 0;
+                 if (segment.words && segment.words.length > 0) {
+                     let charIndex = 0;
+                     let accumulatedTime = 0;
                      segment.words.forEach((w, wIdx) => {
                          const wordText = w.word;
-                         
                          const wordStartPx = ctx.measureText(segment.text.substring(0, charIndex)).width;
-                         const nextCharIndex = wIdx === segment.words.length - 1 ? segment.text.length : charIndex + wordText.length + 1; // encompass space unless last word
+                         const nextCharIndex = wIdx === segment.words!.length - 1 ? segment.text.length : charIndex + wordText.length + 1;
                          const nextStartPx = ctx.measureText(segment.text.substring(0, nextCharIndex)).width;
-
-                         const wDuration = w.duration / 1000; // seconds
+                         const wDuration = w.duration / 1000;
                          const wStart = segment.start + (accumulatedTime / 1000);
                          const wEnd = wStart + wDuration;
-                         
+
                          if (t >= wEnd) {
                              totalFillPx = Math.max(totalFillPx, nextStartPx);
                          } else if (t > wStart) {
-                             const fillRatio = (t - wStart) / wDuration;
-                             totalFillPx = Math.max(totalFillPx, wordStartPx + (nextStartPx - wordStartPx) * fillRatio);
+                             const rawRatio = (t - wStart) / wDuration;
+                             const easedRatio = easeInOutCubic(Math.max(0, Math.min(1, rawRatio)));
+                             totalFillPx = Math.max(totalFillPx, wordStartPx + easedRatio * (nextStartPx - wordStartPx));
                          }
-
                          charIndex = nextCharIndex;
                          accumulatedTime += w.duration;
                      });
-                     
                      if (totalFillPx > 0) {
-                         ctx.rect(startX, baseY - subSize, totalFillPx, subSize * 2);
+                         // Clip covers all wrapped lines
+                         const clipY = linesStartY - actualSize;
+                         const clipH = wrappedLines.length * lineH + actualSize;
+                         ctx.rect(startX, clipY, totalFillPx, clipH);
                      }
                  } else {
-                     // Linear Karaoke Fallback
-                     const duration = segment.end - segment.start;
-                     const progress = Math.max(0, Math.min(1, (t - segment.start) / duration));
-                     const fillW = totalWidth * progress;
-                     ctx.rect(startX, baseY - subSize, fillW, subSize * 2);
+                     const segDuration = segment.end - segment.start;
+                     const rawProgress = Math.max(0, Math.min(1, (t - segment.start) / segDuration));
+                     const easedProgress = easeInOutCubic(rawProgress);
+                     const clipY = linesStartY - actualSize;
+                     const clipH = wrappedLines.length * lineH + actualSize;
+                     ctx.rect(startX, clipY, totalWidth * easedProgress, clipH);
                  }
-                 
                  ctx.clip();
-                 
-                 // Draw Highlighted Text (Glow and Fill)
-                 ctx.shadowColor = karaokeColor;
-                 ctx.shadowBlur = 15;
-                 ctx.fillStyle = karaokeColor;
-                 ctx.fillText(segment.text, baseX, baseY);
-                 
-                 // Draw Stroke again with custom border color
-                 ctx.strokeStyle = karaokeBorderColor;
-                 ctx.lineWidth = Math.max(1, subSize * 0.05); // Slightly thinner than base border
-                 ctx.shadowBlur = 0;
-                 ctx.strokeText(segment.text, baseX, baseY);
 
+                 // Redraw with karaoke color over clip
+                 wrappedLines.forEach((line, lineIdx) => {
+                     const ly = linesStartY + lineIdx * lineH;
+                     ctx.shadowColor = karaokeColor;
+                     ctx.shadowBlur = 20;
+                     ctx.fillStyle = karaokeColor;
+                     ctx.fillText(line, baseX, ly);
+
+                     ctx.strokeStyle = karaokeBorderColor;
+                     ctx.lineWidth = Math.max(1, actualSize * 0.05);
+                     ctx.shadowBlur = 0;
+                     ctx.strokeText(line, baseX, ly);
+                 });
                  ctx.restore();
              }
+
              ctx.restore();
-        });
+         }
+      } else {
+         // --- STANDARD SEGMENT-BASED DRAWING (KARAOKE, TEXT OVERLAY, MARQUEE, SPLIT SCREEN) ---
+         const visibleSegments = parsedSegmentsRef.current.filter(s => 
+             t >= (s.start - preShowTime) && t <= (s.end + 0.5)
+         );
+
+         // Render Split Screen, Left or Right background once if active
+         if ((displayMode === DisplayMode.SPLIT_SCREEN || displayMode === DisplayMode.SPLIT_LEFT || displayMode === DisplayMode.SPLIT_RIGHT) && visibleSegments.length > 0) {
+              ctx.save();
+              if (displayMode === DisplayMode.SPLIT_SCREEN) {
+                  const panelH = canvas.height * 0.35;
+                  const panelY = canvas.height - panelH;
+                  const panelGrad = ctx.createLinearGradient(0, panelY, 0, canvas.height);
+                  panelGrad.addColorStop(0, 'rgba(10, 10, 10, 0.85)');
+                  panelGrad.addColorStop(1, 'rgba(3, 3, 3, 0.98)');
+                  ctx.fillStyle = panelGrad;
+                  ctx.fillRect(0, panelY, canvas.width, panelH);
+                  ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+                  ctx.lineWidth = 1.5;
+                  ctx.beginPath();
+                  ctx.moveTo(0, panelY);
+                  ctx.lineTo(canvas.width, panelY);
+                  ctx.stroke();
+              } else {
+                  const panelW = canvas.width * 0.5;
+                  const panelX = displayMode === DisplayMode.SPLIT_LEFT ? 0 : canvas.width * 0.5;
+                  const panelGrad = ctx.createLinearGradient(panelX, 0, panelX + panelW, 0);
+                  panelGrad.addColorStop(0, 'rgba(12, 12, 12, 0.85)');
+                  panelGrad.addColorStop(1, 'rgba(6, 6, 6, 0.96)');
+                  ctx.fillStyle = panelGrad;
+                  ctx.fillRect(panelX, 0, panelW, canvas.height);
+                  ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+                  ctx.lineWidth = 1.5;
+                  ctx.beginPath();
+                  const dividerX = displayMode === DisplayMode.SPLIT_LEFT ? panelW : panelX;
+                  ctx.moveTo(dividerX, 0);
+                  ctx.lineTo(dividerX, canvas.height);
+                  ctx.stroke();
+              }
+              ctx.restore();
+         }
+
+         visibleSegments.forEach((segment) => {
+              let lineNum = segment.lineNumber;
+              if (!lineNum) {
+                  const segIndex = parsedSegmentsRef.current.indexOf(segment);
+                  lineNum = (segIndex % 2) === 0 ? 1 : 2; 
+              }
+
+              let baseX = canvas.width / 2;
+              let baseY = canvas.height / 2;
+              let align: CanvasTextAlign = 'center';
+
+              const currentAlign = lineNum === 1 ? line1Align : line2Align;
+              if (currentAlign === TextAlign.LEFT) {
+                  baseX = canvas.width * 0.1;
+                  align = 'left';
+              } else if (currentAlign === TextAlign.RIGHT) {
+                  baseX = canvas.width * 0.9;
+                  align = 'right';
+              }
+
+              // Override coordinates for MARQUEE, SPLIT SCREEN, SPLIT LEFT/RIGHT
+              if (displayMode === DisplayMode.MARQUEE) {
+                  baseY = canvas.height - 70 + subOffset;
+                  align = 'left';
+              } else if (displayMode === DisplayMode.SPLIT_SCREEN) {
+                  const panelH = canvas.height * 0.35;
+                  const panelY = canvas.height - panelH;
+                  baseY = panelY + (panelH / 2) + subOffset;
+                  if (lineNum === 2) {
+                      baseY += (subSize * 0.9);
+                  } else {
+                      const hasLine2 = visibleSegments.some(s => {
+                          const idx = parsedSegmentsRef.current.indexOf(s);
+                          const l = s.lineNumber || ((idx % 2) === 0 ? 1 : 2);
+                          return l === 2;
+                      });
+                      if (hasLine2) baseY -= (subSize * 0.4);
+                  }
+              } else if (displayMode === DisplayMode.SPLIT_LEFT || displayMode === DisplayMode.SPLIT_RIGHT) {
+                  baseX = displayMode === DisplayMode.SPLIT_LEFT ? canvas.width * 0.25 : canvas.width * 0.75;
+                  align = 'center';
+                  baseY = canvas.height / 2 + subOffset;
+                  if (lineNum === 2) {
+                      baseY += (subSize * 0.75);
+                  } else {
+                      const hasLine2 = visibleSegments.some(s => {
+                          const idx = parsedSegmentsRef.current.indexOf(s);
+                          const l = s.lineNumber || ((idx % 2) === 0 ? 1 : 2);
+                          return l === 2;
+                      });
+                      if (hasLine2) baseY -= (subSize * 0.5);
+                  }
+              } else {
+                  if (subPos.includes('top')) baseY = canvas.height * 0.1 + subOffset;
+                  else if (subPos.includes('bottom')) baseY = canvas.height * 0.9 - subOffset;
+                  else baseY = canvas.height / 2 + subOffset;
+
+                  if (lineNum === 2) {
+                      baseY += (subSize * lineGap);
+                  }
+              }
+
+              ctx.save();
+              const fontFamily = subFont.split(',')[0];
+              // Determine max text width based on display mode
+              let maxTextWidth = canvas.width * 0.85;
+              if (displayMode === DisplayMode.SPLIT_LEFT || displayMode === DisplayMode.SPLIT_RIGHT) {
+                  maxTextWidth = canvas.width * 0.42; // Half screen minus margin
+              } else if (displayMode === DisplayMode.SPLIT_SCREEN) {
+                  maxTextWidth = canvas.width * 0.85;
+              }
+
+              // Auto-scale font for non-marquee modes
+              let actualSubSize = subSize;
+              if (displayMode !== DisplayMode.MARQUEE) {
+                  actualSubSize = autoScaleFont(ctx, segment.text, maxTextWidth, subSize, fontFamily, '900');
+              }
+              ctx.font = `900 ${actualSubSize}px ${fontFamily}`;
+              ctx.textAlign = align;
+              ctx.textBaseline = 'middle';
+
+              // Wrap text if still too wide (non-marquee only)
+              const wrappedLines = displayMode === DisplayMode.MARQUEE 
+                  ? [segment.text] 
+                  : wrapText(ctx, segment.text, maxTextWidth);
+              const wrapLineH = actualSubSize * 1.2;
+
+              const totalWidth = ctx.measureText(segment.text).width;
+              
+              let startX = baseX;
+              if (align === 'center') startX = baseX - totalWidth / 2;
+              else if (align === 'right') startX = baseX - totalWidth;
+
+              // If Marquee mode, calculate scrolling startX
+              if (displayMode === DisplayMode.MARQUEE) {
+                  const duration = segment.end - segment.start;
+                  const progress = Math.max(0, Math.min(1, (t - segment.start) / duration));
+                  startX = canvas.width - progress * (canvas.width + totalWidth);
+                  baseX = startX; // We draw text at startX since align is left
+                  
+                  // Sleek horizontal background bar for ticker
+                  ctx.restore();
+                  ctx.save();
+                  ctx.fillStyle = 'rgba(10, 10, 10, 0.65)';
+                  ctx.fillRect(0, baseY - actualSubSize - 10, canvas.width, (actualSubSize + 10) * 2);
+                  ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+                  ctx.lineWidth = 1;
+                  ctx.strokeRect(-1, baseY - actualSubSize - 10, canvas.width + 2, (actualSubSize + 10) * 2);
+                  ctx.restore();
+                  
+                  ctx.save();
+                  ctx.font = `900 ${actualSubSize}px ${fontFamily}`;
+                  ctx.textAlign = 'left';
+                  ctx.textBaseline = 'middle';
+              }
+
+              let fillStyle: string | CanvasGradient;
+              if (subColorMode === VizColorMode.SINGLE) {
+                  fillStyle = subColor1;
+              } else {
+                  const grad = ctx.createLinearGradient(startX, 0, startX + totalWidth, 0);
+                  if (subColorMode === VizColorMode.GRADIENT) {
+                      grad.addColorStop(0, subColor1);
+                      grad.addColorStop(1, subColor2);
+                  } else {
+                      grad.addColorStop(0, '#ff0000'); grad.addColorStop(0.2, '#ffff00'); grad.addColorStop(0.4, '#00ff00'); 
+                      grad.addColorStop(0.6, '#00ffff'); grad.addColorStop(0.8, '#0000ff'); grad.addColorStop(1, '#ff00ff');
+                  }
+                  fillStyle = grad;
+              }
+
+              // Draw wrapped lines (base text)
+              const linesStartY = baseY - ((wrappedLines.length - 1) * wrapLineH) / 2;
+              wrappedLines.forEach((line, lineIdx) => {
+                  const ly = linesStartY + lineIdx * wrapLineH;
+                  const lx = displayMode === DisplayMode.MARQUEE ? baseX : baseX; // Keep baseX for all
+                  
+                  // Base Text Stroke
+                  ctx.lineJoin = 'round';
+                  ctx.lineWidth = actualSubSize * 0.1;
+                  ctx.strokeStyle = 'black';
+                  ctx.shadowColor = 'rgba(0,0,0,0.5)';
+                  ctx.shadowBlur = 4;
+                  ctx.strokeText(line, lx, ly);
+                  
+                  ctx.fillStyle = fillStyle;
+                  ctx.fillText(line, lx, ly);
+              });
+
+              // Draw Highlighted Overlay
+              const showHighlight = (displayMode === DisplayMode.KARAOKE) || 
+                                    (displayMode === DisplayMode.SPLIT_SCREEN) ||
+                                    (displayMode === DisplayMode.MARQUEE) ||
+                                    (displayMode === DisplayMode.SPLIT_LEFT) ||
+                                    (displayMode === DisplayMode.SPLIT_RIGHT);
+
+              if (showHighlight) {
+                  ctx.save();
+                  ctx.beginPath();
+                  
+                  const easeInOutCubic = (x: number): number => {
+                    return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+                  };
+                  
+                  let totalFillPx = 0;
+                  let isActivelyFilling = false;
+                  
+                  // Clip region height covers all wrapped lines
+                  const clipY = linesStartY - actualSubSize;
+                  const clipH = wrappedLines.length * wrapLineH + actualSubSize;
+                  
+                  if (segment.words && segment.words.length > 0) {
+                      let charIndex = 0;
+                      let accumulatedTime = 0;
+
+                      segment.words.forEach((w, wIdx) => {
+                          const wordText = w.word;
+                          const wordStartPx = ctx.measureText(segment.text.substring(0, charIndex)).width;
+                          const nextCharIndex = wIdx === segment.words!.length - 1 ? segment.text.length : charIndex + wordText.length + 1;
+                          const nextStartPx = ctx.measureText(segment.text.substring(0, nextCharIndex)).width;
+
+                          const wDuration = w.duration / 1000;
+                          const wStart = segment.start + (accumulatedTime / 1000);
+                          const wEnd = wStart + wDuration;
+                          
+                          if (t >= wEnd) {
+                              totalFillPx = Math.max(totalFillPx, nextStartPx);
+                          } else if (t > wStart) {
+                              isActivelyFilling = true;
+                              const rawRatio = (t - wStart) / wDuration;
+                              const easedRatio = easeInOutCubic(Math.max(0, Math.min(1, rawRatio)));
+                              
+                              const wordPixelWidth = nextStartPx - wordStartPx;
+                              totalFillPx = Math.max(totalFillPx, wordStartPx + easedRatio * wordPixelWidth);
+                          }
+
+                          charIndex = nextCharIndex;
+                          accumulatedTime += w.duration;
+                      });
+                      
+                      if (totalFillPx > 0) {
+                          ctx.rect(startX, clipY, totalFillPx, clipH);
+                      }
+                  } else {
+                      const segDuration = segment.end - segment.start;
+                      const rawProgress = Math.max(0, Math.min(1, (t - segment.start) / segDuration));
+                      const easedProgress = easeInOutCubic(rawProgress);
+                      const fillW = totalWidth * easedProgress;
+                      isActivelyFilling = rawProgress > 0 && rawProgress < 1;
+                      ctx.rect(startX, clipY, fillW, clipH);
+                  }
+                  
+                  ctx.clip();
+                  
+                  const glowIntensity = isActivelyFilling ? 20 : 10;
+                  
+                  // Redraw karaoke highlight over all wrapped lines
+                  wrappedLines.forEach((line, lineIdx) => {
+                      const ly = linesStartY + lineIdx * wrapLineH;
+                      ctx.shadowColor = karaokeColor;
+                      ctx.shadowBlur = glowIntensity;
+                      ctx.fillStyle = karaokeColor;
+                      ctx.fillText(line, baseX, ly);
+                  });
+                  
+                  if (isActivelyFilling) {
+                    wrappedLines.forEach((line, lineIdx) => {
+                        const ly = linesStartY + lineIdx * wrapLineH;
+                        ctx.shadowBlur = glowIntensity * 2;
+                        ctx.globalAlpha = 0.3;
+                        ctx.fillText(line, baseX, ly);
+                        ctx.globalAlpha = 1;
+                    });
+                  }
+                  
+                  wrappedLines.forEach((line, lineIdx) => {
+                      const ly = linesStartY + lineIdx * wrapLineH;
+                      ctx.strokeStyle = karaokeBorderColor;
+                      ctx.lineWidth = Math.max(1, actualSubSize * 0.05);
+                      ctx.shadowBlur = 0;
+                      ctx.strokeText(line, baseX, ly);
+                  });
+
+                  ctx.restore();
+              }
+              ctx.restore();
+         });
+      }
     }
 
     // 5. Icon
@@ -1223,7 +1589,7 @@ const App: React.FC = () => {
     if ((isPlaying || isRecording) && typeof overrideTime !== 'number') {
         animationFrameRef.current = requestAnimationFrame(() => draw());
     }
-  }, [vizStyle, vizAmplitude, vizColorMode, vizColor1, vizColor2, vizIsFullWidth, vizPosX, vizPosY, vizScale, subFont, subSize, subPos, subOffset, subColorMode, subColor1, subColor2, bgType, bgColor, bgImageOpacity, transitionEffect, iconPos, iconSize, isKaraoke, karaokeColor, introDuration, introPos, introAnimIn, introAnimOut, songTitle, artistName, titleFont, titleSize, titleColorMode, titleColor1, titleColor2, artistFont, artistSize, artistColorMode, artistColor1, artistColor2, aspectRatio, isPlaying, isRecording]);
+  }, [vizStyle, vizAmplitude, vizColorMode, vizColor1, vizColor2, vizIsFullWidth, vizPosX, vizPosY, vizScale, subFont, subSize, subPos, subOffset, subColorMode, subColor1, subColor2, bgType, bgColor, bgImageOpacity, transitionEffect, iconPos, iconSize, isKaraoke, displayMode, karaokeColor, karaokeBorderColor, preShowTime, line1Align, line2Align, lineGap, introDuration, introPos, introAnimIn, introAnimOut, songTitle, artistName, titleFont, titleSize, titleColorMode, titleColor1, titleColor2, artistFont, artistSize, artistColorMode, artistColor1, artistColor2, aspectRatio, isPlaying, isRecording]);
 
   // Handlers
   const toggleTheme = () => setIsDark(!isDark);
@@ -1704,12 +2070,24 @@ const App: React.FC = () => {
     // Auto set Song Title from filename
     setSongTitle(selectedFile.name.replace(/\.[^/.]+$/, ""));
     setArtistName(""); // Reset artist
+    setWaveformData(null); // Reset waveform
+    audioBase64CacheRef.current = null;
 
     if (audioUrl) URL.revokeObjectURL(audioUrl);
     const objectUrl = URL.createObjectURL(selectedFile);
     setAudioUrl(objectUrl);
     const audio = new Audio(objectUrl);
     audio.addEventListener('loadedmetadata', () => setDuration(audio.duration));
+    
+    // Extract waveform in background (Module 6)
+    setIsAnalyzingAudio(true);
+    extractWaveform(selectedFile, 100).then(wf => {
+      setWaveformData(wf);
+      setIsAnalyzingAudio(false);
+    }).catch(err => {
+      console.warn('Waveform extraction failed:', err);
+      setIsAnalyzingAudio(false);
+    });
   };
   const clearFile = (e: React.MouseEvent) => {
     e.stopPropagation(); setFile(null); setAudioUrl(null); setResult(''); setError(null); setIsPlaying(false);
@@ -1774,9 +2152,12 @@ const App: React.FC = () => {
       setShowApiKeyDialog(true);
       return;
     }
-    setIsProcessing(true); setError(null); setResult('');
+    setIsProcessing(true); setError(null); setResult(''); setRefinementStatus('Đang nén audio...');
     try {
+      // Step 1: Compress audio
       const { base64, mimeType } = await compressAudioToMonoWav(file);
+      audioBase64CacheRef.current = { base64, mimeType };
+      
       let activeModel = model;
       if (autoSelectModel) {
         if (availableModels.length > 0) {
@@ -1785,27 +2166,175 @@ const App: React.FC = () => {
           activeModel = 'gemini-2.5-flash';
         }
       }
-      const rawResponse = await processAudioWithGemini(base64, mimeType, mode, language, duration, activeModel, referenceLyrics);
-      if (mode === ProcessingMode.LYRICS) setResult(rawResponse);
-      else {
+      
+      // Step 2: Pass 1 - Initial extraction with word-level timing
+      setRefinementStatus('Pass 1: Trích xuất timing từ AI...');
+      const rawResponse = await processAudioWithGemini(base64, mimeType, mode, language, duration, activeModel, referenceLyrics, enableWordLevel);
+      
+      if (mode === ProcessingMode.LYRICS) {
+        setResult(rawResponse);
+      } else {
         try {
-          // Extremely robust extraction of JSON object from response string
+          // Robust JSON extraction
           let cleanedResponse = rawResponse.trim();
           const firstBrace = cleanedResponse.indexOf('{');
           const lastBrace = cleanedResponse.lastIndexOf('}');
           if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
             cleanedResponse = cleanedResponse.substring(firstBrace, lastBrace + 1);
           }
-          const parsed = JSON.parse(cleanedResponse);
-          let segments: SubtitleSegment[] = (parsed.segments || []).map((s: any, idx: number) => ({
-            ...s, index: idx + 1, start: Number(s.start), end: Number(s.end),
-            text: textCase === TextCase.UPPER ? s.text.toUpperCase() : textCase === TextCase.LOWER ? s.text.toLowerCase() : s.text
-          }));
+          // JSON repair for truncated responses
+          const repairTruncatedJSON = (jsonStr: string): string => {
+            let s = jsonStr.trim();
+            // Count unclosed brackets
+            let braces = 0, brackets = 0, inString = false, escaped = false;
+            for (let i = 0; i < s.length; i++) {
+              const c = s[i];
+              if (escaped) { escaped = false; continue; }
+              if (c === '\\') { escaped = true; continue; }
+              if (c === '"') { inString = !inString; continue; }
+              if (inString) continue;
+              if (c === '{') braces++;
+              if (c === '}') braces--;
+              if (c === '[') brackets++;
+              if (c === ']') brackets--;
+            }
+            // Close unclosed strings
+            if (inString) s += '"';
+            // Remove trailing incomplete object/value (after last comma or opening bracket)
+            const lastComplete = Math.max(s.lastIndexOf('},'), s.lastIndexOf('}]'));
+            if (lastComplete > 0 && (braces > 0 || brackets > 0)) {
+              s = s.substring(0, lastComplete + 1);
+              // Recount
+              braces = 0; brackets = 0; inString = false; escaped = false;
+              for (let i = 0; i < s.length; i++) {
+                const c = s[i];
+                if (escaped) { escaped = false; continue; }
+                if (c === '\\') { escaped = true; continue; }
+                if (c === '"') { inString = !inString; continue; }
+                if (inString) continue;
+                if (c === '{') braces++;
+                if (c === '}') braces--;
+                if (c === '[') brackets++;
+                if (c === ']') brackets--;
+              }
+            }
+            // Close remaining brackets
+            while (brackets > 0) { s += ']'; brackets--; }
+            while (braces > 0) { s += '}'; braces--; }
+            return s;
+          };
+
+          let parsed;
+          try {
+            parsed = JSON.parse(cleanedResponse);
+          } catch (jsonErr) {
+            console.warn('JSON parse failed, attempting repair...', jsonErr);
+            const repaired = repairTruncatedJSON(cleanedResponse);
+            parsed = JSON.parse(repaired); // If this also fails, outer catch handles it
+          }
+          const parseSegmentData = (s: any, idx: number): SubtitleSegment => {
+            const rawText = String(s.text || '');
+            let text = rawText;
+            let words: { word: string, duration: number }[] | undefined = undefined;
+
+            // Check if text has inline timing like: word{500}
+            if (/\{(\d+)\}/.test(rawText)) {
+              words = [];
+              const parts = rawText.split(/(\{[\d]+\})/);
+              let currentWord = "";
+              for (let i = 0; i < parts.length; i++) {
+                const part = parts[i];
+                if (/^\{(\d+)\}$/.test(part)) {
+                  const duration = parseInt(part.slice(1, -1), 10);
+                  if (currentWord.trim()) {
+                    words.push({ word: currentWord.trim(), duration });
+                    currentWord = "";
+                  }
+                } else {
+                  currentWord = part;
+                }
+              }
+              // Clean the text by removing all {duration} tags and duplicate spaces
+              text = rawText.replace(/\{[\d]+\}/g, '').replace(/\s+/g, ' ').trim();
+            } else if (Array.isArray(s.words) && s.words.length > 0) {
+              words = s.words.map((w: any) => ({ 
+                word: String(w.word || ''), 
+                duration: Number(w.duration) || 0 
+              }));
+            }
+
+            return {
+              index: idx + 1, 
+              start: Number(s.start), 
+              end: Number(s.end),
+              text: textCase === TextCase.UPPER ? text.toUpperCase() : textCase === TextCase.LOWER ? text.toLowerCase() : text,
+              words,
+              lineNumber: s.lineNumber
+            };
+          };
+
+          let segments: SubtitleSegment[] = (parsed.segments || []).map((s: any, idx: number) => parseSegmentData(s, idx));
+          
+          // Step 3: Pass 2 - Multi-pass refinement (Module 3)
+          if (enableMultiPass && segments.length > 0) {
+            setRefinementStatus('Pass 2: Tinh chỉnh word-level timing...');
+            try {
+              const currentJson = JSON.stringify({ segments });
+              const refinedResponse = await refineTimingWithGemini(
+                base64, mimeType, currentJson, language, duration, activeModel,
+                (prog) => setRefinementStatus(prog.status)
+              );
+              let refinedCleaned = refinedResponse.trim();
+              const fb = refinedCleaned.indexOf('{');
+              const lb = refinedCleaned.lastIndexOf('}');
+              if (fb !== -1 && lb !== -1 && lb > fb) {
+                refinedCleaned = refinedCleaned.substring(fb, lb + 1);
+              }
+              const refinedParsed = JSON.parse(refinedCleaned);
+              if (refinedParsed.segments && refinedParsed.segments.length > 0) {
+                segments = refinedParsed.segments.map((s: any, idx: number) => parseSegmentData(s, idx));
+              }
+            } catch (refineErr) {
+              console.warn('Multi-pass refinement failed, using Pass 1 result:', refineErr);
+            }
+          }
+          
+          // Step 4: Post-processing pipeline (Module 2) - wrapped in try-catch for safety
+          if (enablePostProcess) {
+            setRefinementStatus('Hậu xử lý: Sửa overlap, gap, redistribute...');
+            try {
+              // Get energy peaks for snapping (Module 6)
+              let energyPeaks: number[] = [];
+              if (enableAutoSnap && waveformData) {
+                try {
+                  const peaks = detectEnergyPeaks(waveformData, 0.25, 0.1);
+                  energyPeaks = peaks.map(p => p.time);
+                } catch (peakErr) {
+                  console.warn('Energy peak detection failed:', peakErr);
+                }
+              }
+              
+              segments = runPostProcessing(segments, {
+                duration,
+                referenceLyrics: referenceLyrics || undefined,
+                energyPeaks,
+                autoSplitWords: enableWordLevel,
+                maxGap: 0.3,
+                snapToPeaks: enableAutoSnap && energyPeaks.length > 0
+              });
+            } catch (postErr) {
+              console.error('Post-processing failed, using raw AI segments:', postErr);
+              // Continue with unprocessed segments - don't throw
+            }
+          }
+          
+          setRefinementStatus('');
+          
           const finalResult = format === ExportFormat.SRT ? parseSegmentsToSRT(segments) : parseSegmentsToASS(segments, file.name);
           setResult(finalResult);
           if (segments.length > 0) setActiveTab('player');
           
-          // Tự động download Subtitle sau khi tạo
+          // Auto download subtitle
           setTimeout(() => {
               const ext = format === ExportFormat.SRT ? '.srt' : '.ass';
               const name = file ? file.name.split('.')[0] + ext : `subtitle${ext}`;
@@ -1816,9 +2345,9 @@ const App: React.FC = () => {
               URL.revokeObjectURL(url);
           }, 500);
 
-        } catch (e) { setResult(rawResponse); setError("AI trả về định dạng thô."); }
+        } catch (e: any) { console.error('Subtitle parsing error:', e); setResult(rawResponse); setError(`AI trả về định dạng thô. Lỗi: ${e?.message || e}`); }
       }
-    } catch (err: any) { setError(`Lỗi: ${err.message}`); } finally { setIsProcessing(false); }
+    } catch (err: any) { setError(`Lỗi: ${err.message}`); } finally { setIsProcessing(false); setRefinementStatus(''); }
   };
   const copyToClipboard = () => {
     navigator.clipboard.writeText(result); setCopySuccess(true); setTimeout(() => setCopySuccess(false), 2000);
@@ -1830,6 +2359,43 @@ const App: React.FC = () => {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url; link.download = name; link.click();
+  };
+  
+  // ===== NEW: Enhanced Export Functions (Module 5) =====
+  const downloadKaraokeASS = () => {
+    if (!parsedSegmentsRef.current || parsedSegmentsRef.current.length === 0) return;
+    const assContent = parseSegmentsToKaraokeASS(parsedSegmentsRef.current, file?.name || 'karaoke', true);
+    const name = file ? file.name.split('.')[0] + '_karaoke.ass' : 'karaoke.ass';
+    const blob = new Blob([assContent], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url; link.download = name; link.click();
+    URL.revokeObjectURL(url);
+  };
+  
+  const downloadLRC = () => {
+    if (!parsedSegmentsRef.current || parsedSegmentsRef.current.length === 0) return;
+    const lrcContent = parseSegmentsToLRC(parsedSegmentsRef.current, {
+      title: songTitle || undefined,
+      artist: artistName || undefined
+    });
+    const name = file ? file.name.split('.')[0] + '.lrc' : 'lyrics.lrc';
+    const blob = new Blob([lrcContent], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url; link.download = name; link.click();
+    URL.revokeObjectURL(url);
+  };
+  
+  const downloadPlainLyrics = () => {
+    if (!parsedSegmentsRef.current || parsedSegmentsRef.current.length === 0) return;
+    const lyrics = parseSegmentsToPlainLyrics(parsedSegmentsRef.current);
+    const name = file ? file.name.split('.')[0] + '_lyrics.txt' : 'lyrics.txt';
+    const blob = new Blob([lyrics], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url; link.download = name; link.click();
+    URL.revokeObjectURL(url);
   };
 
   const handleSunoOptimize = async () => {
@@ -2018,12 +2584,81 @@ const App: React.FC = () => {
               </div>
             )}
             
+            {/* ===== NEW: Karaoke Sync Settings ===== */}
+            <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-3">
+              <p className="text-[9px] font-black uppercase tracking-widest text-indigo-500 flex items-center gap-1.5"><Zap className="w-3 h-3" /> Cơ chế khớp lời Karaoke</p>
+              
+              <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                <input type="checkbox" checked={enableWordLevel} onChange={(e) => setEnableWordLevel(e.target.checked)} 
+                  className="w-3.5 h-3.5 rounded accent-indigo-500 cursor-pointer" />
+                <div className="flex-1">
+                  <p className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Word-Level Timing</p>
+                  <p className="text-[9px] text-slate-400">AI trả timing từng từ thay vì cả câu</p>
+                </div>
+              </label>
+              
+              <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                <input type="checkbox" checked={enablePostProcess} onChange={(e) => setEnablePostProcess(e.target.checked)} 
+                  className="w-3.5 h-3.5 rounded accent-indigo-500 cursor-pointer" />
+                <div className="flex-1">
+                  <p className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Hậu xử lý tự động</p>
+                  <p className="text-[9px] text-slate-400">Sửa overlap, gap, redistribute timing</p>
+                </div>
+              </label>
+              
+              <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                <input type="checkbox" checked={enableAutoSnap} onChange={(e) => setEnableAutoSnap(e.target.checked)} 
+                  className="w-3.5 h-3.5 rounded accent-indigo-500 cursor-pointer" />
+                <div className="flex-1">
+                  <p className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Auto-Snap Waveform</p>
+                  <p className="text-[9px] text-slate-400">Neo timing vào đỉnh năng lượng âm thanh</p>
+                </div>
+              </label>
+              
+              <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                <input type="checkbox" checked={enableMultiPass} onChange={(e) => setEnableMultiPass(e.target.checked)} 
+                  className="w-3.5 h-3.5 rounded accent-emerald-500 cursor-pointer" />
+                <div className="flex-1">
+                  <p className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Multi-Pass Refinement</p>
+                  <p className="text-[9px] text-slate-400">2 lần gọi AI để tinh chỉnh (tốn gấp đôi token)</p>
+                </div>
+              </label>
+              
+              {/* Waveform status */}
+              {file && (
+                <div className="flex items-center gap-2 text-[9px]">
+                  <Activity className="w-3 h-3 text-indigo-500" />
+                  <span className={`font-bold ${waveformData ? 'text-emerald-500' : isAnalyzingAudio ? 'text-amber-500' : 'text-slate-400'}`}>
+                    {waveformData ? `Waveform ✓ (${Math.round(waveformData.duration)}s)` : isAnalyzingAudio ? 'Đang phân tích...' : 'Chưa phân tích'}
+                  </span>
+                </div>
+              )}
+            </div>
+            
             <button onClick={handleProcess} disabled={isProcessing || !file}
               className="w-full py-3 rounded-xl font-black text-xs uppercase tracking-widest bg-indigo-600 text-white flex items-center justify-center gap-2 disabled:opacity-50 hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-600/20"
             >
               {isProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-              Bắt đầu trích xuất
+              {isProcessing ? (refinementStatus || 'Đang xử lý...') : 'Bắt đầu trích xuất'}
             </button>
+            
+            {/* Export Format Buttons */}
+            {parsedSegments.length > 0 && (
+              <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5"><Download className="w-3 h-3" /> Xuất thêm định dạng</p>
+                <div className="grid grid-cols-3 gap-2">
+                  <button onClick={downloadKaraokeASS} className="px-2 py-2 bg-violet-100 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400 text-[9px] font-bold uppercase rounded-lg hover:bg-violet-200 dark:hover:bg-violet-900/50 transition-colors text-center">
+                    ASS Karaoke<br/><span className="text-[8px] opacity-60">{"\\kf tags"}</span>
+                  </button>
+                  <button onClick={downloadLRC} className="px-2 py-2 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 text-[9px] font-bold uppercase rounded-lg hover:bg-emerald-200 dark:hover:bg-emerald-900/50 transition-colors text-center">
+                    LRC<br/><span className="text-[8px] opacity-60">Word-level</span>
+                  </button>
+                  <button onClick={downloadPlainLyrics} className="px-2 py-2 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 text-[9px] font-bold uppercase rounded-lg hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors text-center">
+                    TXT<br/><span className="text-[8px] opacity-60">Lời thuần</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* INTRO & DONATE SECTION */}
@@ -2466,17 +3101,33 @@ const App: React.FC = () => {
                         )}
                       </div>
 
-                      {/* Karaoke Options */}
+                      {/* Chế độ Hiển thị chữ */}
                       <div className="flex flex-col gap-2 bg-white dark:bg-slate-800 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
-                        <div className="flex items-center gap-2">
-                            <Mic2 className={`w-3 h-3 ${isKaraoke ? 'text-red-500' : ''}`} />
-                            <label className="flex items-center gap-2 cursor-pointer select-none flex-1">
-                                <input type="checkbox" checked={isKaraoke} onChange={(e) => setIsKaraoke(e.target.checked)} className="w-3 h-3 accent-red-500" />
-                                <span className="font-bold text-xs">Chế độ Karaoke</span>
-                            </label>
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                                <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-500" />
+                                <span className="font-bold text-xs">Chế độ hiển thị chữ</span>
+                            </div>
+                            <select 
+                                value={displayMode} 
+                                onChange={(e) => {
+                                    const mode = e.target.value as DisplayMode;
+                                    setDisplayMode(mode);
+                                    setIsKaraoke(mode !== DisplayMode.TEXT_OVERLAY);
+                                }} 
+                                className="text-[10px] bg-slate-50 dark:bg-slate-900 rounded border border-slate-200 dark:border-slate-700 p-1 outline-none font-medium cursor-pointer"
+                            >
+                                <option value={DisplayMode.KARAOKE}>🎤 Karaoke (Cơ bản)</option>
+                                <option value={DisplayMode.TEXT_OVERLAY}>📝 Text Overlay (CapCut)</option>
+                                <option value={DisplayMode.MARQUEE}>📺 Marquee (Chạy ngang)</option>
+                                <option value={DisplayMode.SPLIT_SCREEN}>🥞 Split Screen (Nửa dưới)</option>
+                                <option value={DisplayMode.TELEPROMPTER}>📜 Teleprompter (Chạy dọc)</option>
+                                <option value={DisplayMode.SPLIT_LEFT}>🚪 Split Left (1/2 bên trái)</option>
+                                <option value={DisplayMode.SPLIT_RIGHT}>🚪 Split Right (1/2 bên phải)</option>
+                            </select>
                         </div>
                         
-                        {isKaraoke && (
+                        {displayMode !== DisplayMode.TEXT_OVERLAY && (
                             <div className="mt-1 pt-2 border-t border-slate-100 dark:border-slate-700 space-y-3 animate-in fade-in slide-in-from-top-1">
                                 {/* Color */}
                                 <div className="flex items-center justify-between">
@@ -2757,10 +3408,60 @@ const App: React.FC = () => {
                                   }
                               }}
                               onSegmentUpdate={handleSegmentUpdate}
+                              waveformData={waveformData?.amplitudes || null}
+                              waveformSampleRate={waveformData?.sampleRate || 100}
                           />
                       </div>
                   )}
                   
+                  {/* ===== FULL LYRICS PANEL ===== */}
+                  {result && parsedSegments.length > 0 && (
+                      <div className="mt-6 pt-6 border-t border-slate-200 dark:border-slate-800">
+                          <div className="flex items-center justify-between mb-4">
+                              <div className="flex items-center gap-2">
+                                  <BookOpen className="w-4 h-4 text-indigo-500" />
+                                  <span className="text-xs font-bold uppercase text-slate-600 dark:text-slate-400">Lời Toàn Bài</span>
+                                  <span className="text-[9px] px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 font-bold">{parsedSegments.length} câu</span>
+                              </div>
+                          </div>
+                          <div 
+                              id="lyrics-panel-scroll"
+                              className="max-h-[320px] overflow-y-auto rounded-2xl bg-gradient-to-b from-slate-50 to-white dark:from-slate-900 dark:to-slate-950 border border-slate-200 dark:border-slate-800 p-4 space-y-1 custom-scrollbar scroll-smooth"
+                          >
+                              {parsedSegments.map((seg, idx) => {
+                                  const isActive = currentTime >= seg.start && currentTime <= seg.end;
+                                  const isPast = currentTime > seg.end;
+                                  const isNext = !isActive && !isPast && idx === parsedSegments.findIndex(s => currentTime < s.start);
+                                  return (
+                                      <div
+                                          key={`lyric-${idx}`}
+                                          id={`lyric-line-${idx}`}
+                                          onClick={() => {
+                                              if (audioPlayerRef.current) {
+                                                  audioPlayerRef.current.currentTime = seg.start;
+                                                  setCurrentTime(seg.start);
+                                              }
+                                          }}
+                                          className={`px-4 py-2 rounded-xl cursor-pointer transition-all duration-300 text-sm leading-relaxed font-semibold select-none ${
+                                              isActive
+                                                  ? 'bg-indigo-500/15 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300 scale-[1.02] shadow-sm border border-indigo-500/30'
+                                                  : isPast
+                                                      ? 'text-slate-400 dark:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800/50'
+                                                      : isNext
+                                                          ? 'text-slate-700 dark:text-slate-300 bg-slate-100/50 dark:bg-slate-800/30 hover:bg-slate-100 dark:hover:bg-slate-800/50'
+                                                          : 'text-slate-500 dark:text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800/50'
+                                          }`}
+                                      >
+                                          <span className="text-[9px] font-mono text-slate-400 dark:text-slate-600 mr-2">
+                                              {Math.floor(seg.start / 60)}:{String(Math.floor(seg.start % 60)).padStart(2, '0')}
+                                          </span>
+                                          {seg.text}
+                                      </div>
+                                  );
+                              })}
+                          </div>
+                      </div>
+                  )}
                   {!result && (
                      <div className="mt-6 p-4 bg-amber-50 dark:bg-amber-900/10 rounded-2xl border border-amber-200 dark:border-amber-800/50 flex items-center gap-3">
                         <AlertCircle className="w-4 h-4 text-amber-500" />

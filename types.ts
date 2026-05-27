@@ -92,6 +92,16 @@ export enum IntroAnimation {
   SLIDE_RIGHT = 'Slide Right'
 }
 
+export enum DisplayMode {
+  KARAOKE = 'Karaoke',
+  TEXT_OVERLAY = 'Text Overlay',
+  MARQUEE = 'Marquee',
+  SPLIT_SCREEN = 'Split Screen',
+  TELEPROMPTER = 'Teleprompter',
+  SPLIT_LEFT = 'Split Left',
+  SPLIT_RIGHT = 'Split Right'
+}
+
 export enum CornerPosition {
   TOP_LEFT = 'Top Left',
   TOP_RIGHT = 'Top Right',

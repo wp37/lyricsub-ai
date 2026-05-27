@@ -36,7 +36,6 @@ export async function getAvailableModels(): Promise<ModelInfo[]> {
     const modelsResponse = await ai.models.list();
     const models: ModelInfo[] = [];
 
-    // The genai sdk list() returns an async iterable
     const excludePatterns = [
       'vision', 'experimental', 'embedding', 'robotics', 'tts',
       'nano', 'custom-tools', 'live', 'lite', 'imagen', 'learnlm',
@@ -57,7 +56,6 @@ export async function getAvailableModels(): Promise<ModelInfo[]> {
       }
     }
     
-    // Sort: prioritize Flash over Pro (since Flash has a 1,000,000 TPM free tier rate limit vs only 32,000 TPM for Pro, which is required for audio files)
     return models.sort((a, b) => {
       const aIsFlash = a.name.includes('flash') ? 1 : 0;
       const bIsFlash = b.name.includes('flash') ? 1 : 0;
@@ -75,6 +73,55 @@ export async function getAvailableModels(): Promise<ModelInfo[]> {
   }
 }
 
+// ===== WORD-LEVEL TIMING SCHEMA (Highly Compressed Inline Format) =====
+const WORD_LEVEL_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    segments: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          index: { type: Type.INTEGER },
+          start: { type: Type.NUMBER, description: "Start time in seconds (e.g. 15.5)" },
+          end: { type: Type.NUMBER, description: "End time in seconds (e.g. 18.2)" },
+          text: { type: Type.STRING, description: "Văn bản kèm thời lượng từng từ dạng 'Từ{mili_giây}', ví dụ: 'Tôi{500} yêu{350} em{450}'" }
+        },
+        required: ["index", "start", "end", "text"]
+      }
+    }
+  },
+  required: ["segments"]
+};
+
+// Segment-only schema (legacy fallback)
+const SEGMENT_ONLY_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    segments: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          index: { type: Type.INTEGER },
+          start: { type: Type.NUMBER, description: "Start time in seconds (e.g. 15.5)" },
+          end: { type: Type.NUMBER, description: "End time in seconds (e.g. 18.2)" },
+          text: { type: Type.STRING, description: "Subtitle text" },
+        },
+        required: ["index", "start", "end", "text"]
+      }
+    }
+  },
+  required: ["segments"]
+};
+
+// Helper: Determine max output tokens based on model capabilities
+function getMaxOutputTokens(modelName: string): number {
+  const name = modelName.toLowerCase();
+  if (name.includes('pro')) return 131072; // 128K for Pro models - handles long songs with word-level timing
+  return 65536; // 64K for Flash models
+}
+
 export async function processAudioWithGemini(
   audioBase64: string,
   mimeType: string,
@@ -82,68 +129,75 @@ export async function processAudioWithGemini(
   language: string,
   duration: number,
   modelName: string | GeminiModel = GeminiModel.V3_FLASH,
-  referenceLyrics?: string
+  referenceLyrics?: string,
+  enableWordLevel: boolean = true
 ): Promise<string> {
   const ai = new GoogleGenAI({ apiKey: getEffectiveApiKey() });
   
   const isThinkingModel = modelName.includes('thinking');
 
-  // System Instruction: Cân bằng giữa "Timing" và "Content"
+  // ===== ENHANCED SYSTEM INSTRUCTION (Module 1 - Compressed) =====
   const systemInstruction = mode === ProcessingMode.LYRICS 
     ? "Bạn là chuyên gia biên tập lời bài hát (Lyrics Editor). Nhiệm vụ: Nghe file audio, nhận diện lời hát chính xác, trình bày chia khổ (verse/chorus) rõ ràng, đúng chính tả. Không thêm lời dẫn."
-    : `Bạn là chuyên gia kỹ thuật âm thanh (Audio Timing Engineer) chuyên về Karaoke.
+    : `Bạn là chuyên gia kỹ thuật âm thanh cấp cao (Senior Audio Timing Engineer) chuyên về Karaoke Word-Level Sync.
        
-       MỤC TIÊU CỐT LÕI: TẠO TRẢI NGHIỆM KARAOKE MƯỢT MÀ.
+       MỤC TIÊU CỐT LÕI: TẠO KARAOKE KHỚP TỪNG TỪ CHO TOÀN BỘ BÀI HÁT (FULL LENGTH SYNCHRONIZATION).
        
        QUY TẮC VÀNG VỀ THỜI GIAN (TIMING RULES):
-       1. **START (Vocal Onset):** Bắt đầu ngay khi ca sĩ nhả chữ đầu tiên. Bỏ qua nhạc dạo.
-       2. **END (Vocal Offset - QUAN TRỌNG NHẤT):** Thời gian kết thúc phải là khoảnh khắc CHÍNH XÁC ca sĩ ngắt tiếng của từ cuối cùng. 
-          - TUYỆT ĐỐI KHÔNG tính khoảng lặng (silence) hoặc nhạc nền sau câu hát vào 'end'.
-          - Nếu 'end' bị trễ, thanh karaoke sẽ chạy chậm hơn nhạc -> Trải nghiệm tồi. Hãy cắt 'end' thật gọn (Tight Timing).
+       1. **START (Vocal Onset):** Bắt đầu ngay khoảnh khắc ca sĩ phát ra âm thanh đầu tiên của câu. Bỏ qua nhạc dạo/nhạc nền.
+       2. **END (Vocal Offset):** Kết thúc đúng lúc ca sĩ dứt tiếng từ cuối cùng. Cắt gọn gàng ngay khi dứt tiếng.
+       3. **INLINE WORD TIMING (SIÊU QUAN TRỌNG - TIẾT KIỆM BỘ NHỚ):**
+          - Bạn PHẢI tích hợp thời lượng của mỗi từ TRỰC TIẾP vào trong câu văn bản ở trường "text" dưới dạng 'Từ{mili_giây}'.
+          - Ví dụ: Thay vì viết "Tôi yêu em" → Bạn viết "Tôi{600} yêu{800} em{600}".
+          - Mỗi từ trong câu phải có thời lượng (duration) bằng mili-giây thật chính xác theo tốc độ hát.
+          - Tổng thời lượng của tất cả các từ trong câu phải đúng bằng (end - start) * 1000.
+          - KHÔNG được bỏ sót bất kỳ từ nào, kể cả từ đệm.
+       4. **MẠCH LẠC:** Segments phải theo thứ tự thời gian, không overlap.
+       5. **TOÀN BỘ BÀI HÁT (BẮT BUỘC):**
+          - Bạn BẮT BUỘC phải nghe, nhận diện và trích xuất timing cho TOÀN BỘ thời lượng bài hát từ giây 0:00 cho đến giây cuối cùng (giây thứ ${Math.floor(duration)}).
+          - TUYỆT ĐỐI KHÔNG ĐƯỢC DỪNG LẠI ở giữa chừng. Phải trích xuất đầy đủ tất cả các câu hát cho đến khi hết audio. Kể cả bài hát dài, hãy kiên trì trích xuất hết 100%.
        
-       3. **KHÔNG BỎ SÓT:** Phải bắt được mọi từ ngữ, kể cả rap nhanh, hát bè.
-
        RÀNG BUỘC KỸ THUẬT:
-       - Thời gian 'start' < 'end'.
-       - 'start' và 'end' phải nằm trong khoảng 0 - ${duration.toFixed(2)}.
-       - Ngôn ngữ: ${language}.`;
+       - start < end cho mọi segment.
+       - 0 ≤ start, end ≤ ${duration.toFixed(2)}.
+       - Ngôn ngữ: ${language}.
+       - Phân chia câu ngắn gọn từ 2-4 giây để hiển thị mượt mà.`;
 
-  // Prompt: Thêm cơ chế "Anchor" để neo thời gian và đảm bảo trích xuất trọn vẹn
   const referencePrompt = referenceLyrics 
-    ? `\n\nLỜI GỐC ĐỂ ĐỐI CHIẾU (BẮT BUỘC: Bạn phải căn chỉnh thời gian cho TOÀN BỘ lời gốc dưới đây từ đầu đến cuối bài, không được phép cắt xén, bỏ bớt hay dừng lại nửa chừng):\n${referenceLyrics}` 
+    ? `\n\nLỜI GỐC ĐỂ ĐỐI CHIẾU (BẮT BUỘC TUÂN THỦ):
+Bạn PHẢI căn chỉnh thời gian cho TOÀN BỘ lời gốc dưới đây, từ đầu đến cuối. 
+KHÔNG được cắt xén, bỏ bớt, hay thay đổi bất kỳ từ nào.
+Mỗi từ trong lời gốc phải xuất hiện trong output với timing chính xác.
+Mỗi từ phải đi kèm với {duration} bằng mili-giây.
+
+${referenceLyrics}` 
     : "";
 
+  // ===== ENHANCED PROMPT (Module 1 - Compressed) =====
   const prompt = mode === ProcessingMode.LYRICS
     ? `Trích xuất lời bài hát cho file audio này. Ngôn ngữ: ${language}. Độ dài: ${Math.floor(duration)}s.${referencePrompt}`
-    : `Phân tích Audio và tạo JSON phụ đề Karaoke chuẩn từng mili-giây.
+    : `Phân tích Audio và tạo JSON Karaoke WORD-LEVEL TIMING chuẩn từng mili-giây dưới dạng tích hợp gọn nhẹ (Inline format) cho toàn bộ bài hát dài ${Math.floor(duration)} giây.
        
-       LƯU Ý KHI XỬ LÝ:
-       1. **Chặt chẽ (Tightness):** Với câu "Tôi yêu em", ngay khi chữ "em" vừa dứt, hãy đóng timestamp 'end' ngay lập tức. Đừng đợi hết khuôn nhạc.
-       2. **Mật độ:** Với đoạn Rap/Hát nhanh, hãy chia nhỏ segment (1-3s) để chữ chạy kịp nhạc.
+       YÊU CẦU BẮT BUỘC KHÔNG THỂ BỎ QUA:
+       - Bạn phải trích xuất timing cho TOÀN BỘ thời lượng bài hát từ giây 0:00 cho đến giây cuối cùng là ${Math.floor(duration)} giây.
+       - Tuyệt đối không dừng lại ở giữa chừng. Phải bao phủ toàn bộ nội dung bài hát.
+       
+       HƯỚNG DẪN CHI TIẾT:
+       1. **Nghe kỹ từng từ**: Xác định chính xác thời điểm bắt đầu và kết thúc MỖI TỪ.
+       2. **Định dạng inline**: Viết thời lượng (duration tính bằng mili-giây) trực tiếp sau mỗi từ trong trường "text" dưới dạng: word{duration_ms}
+          Ví dụ: Câu "Tôi yêu em" hát trong 2 giây (start: 12.0, end: 14.0):
+          "text": "Tôi{600} yêu{800} em{600}"
+       3. **Tight timing**: Segment "end" phải cắt ngay khi từ cuối dứt tiếng.
+       4. **Tổng words duration = (end - start) * 1000**: Bắt buộc khớp!
        
        ${referencePrompt}
        
-       Output JSON Schema: { "segments": [{ "index": 1, "start": 12.5, "end": 15.2, "text": "Lời bài hát..." }] }`;
+       Output JSON bắt buộc khớp theo schema dưới đây:
+       { "segments": [{ "index": 1, "start": 12.5, "end": 15.2, "text": "Tôi{500} yêu{600} em{400}" }] }`;
 
-  const responseSchema = mode === ProcessingMode.SUBTITLES ? {
-    type: Type.OBJECT,
-    properties: {
-      segments: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            index: { type: Type.INTEGER },
-            start: { type: Type.NUMBER, description: "Start time in seconds (e.g. 15.5)" },
-            end: { type: Type.NUMBER, description: "End time in seconds (e.g. 18.2)" },
-            text: { type: Type.STRING, description: "Subtitle text" },
-          },
-          required: ["index", "start", "end", "text"]
-        }
-      }
-    },
-    required: ["segments"]
-  } : undefined;
+  const responseSchema = mode === ProcessingMode.SUBTITLES 
+    ? (enableWordLevel ? WORD_LEVEL_SCHEMA : SEGMENT_ONLY_SCHEMA)
+    : undefined;
 
   const result = await ai.models.generateContent({
     model: typeof modelName === 'string' ? modelName : modelName,
@@ -159,15 +213,96 @@ export async function processAudioWithGemini(
       systemInstruction,
       responseMimeType: mode === ProcessingMode.SUBTITLES ? "application/json" : "text/plain",
       responseSchema: mode === ProcessingMode.SUBTITLES ? responseSchema : undefined,
-      // Temperature 0.2: Ổn định để timing chính xác nhưng vẫn đủ linh hoạt để nghe rõ lời
-      temperature: 0.2, 
-      maxOutputTokens: 8192,
-      thinkingConfig: isThinkingModel ? { thinkingBudget: 1024 } : undefined
+      temperature: 0.1, // Lower temperature for more precise timing
+      maxOutputTokens: getMaxOutputTokens(typeof modelName === 'string' ? modelName : modelName), // Pro: 128K, Flash: 64K
+      thinkingConfig: isThinkingModel ? { thinkingBudget: 2048 } : undefined
     }
   });
 
   return result.text || "";
 }
+
+// ===== MODULE 3: MULTI-PASS REFINEMENT =====
+
+export interface RefinementProgress {
+  currentPass: number;
+  totalPasses: number;
+  status: string;
+}
+
+/**
+ * Multi-pass refinement: re-sends segments back to AI for timing correction
+ * Pass 1: Initial extraction (already done)
+ * Pass 2: Refine word-level timing with segment context
+ * Pass 3: Validation pass
+ */
+export async function refineTimingWithGemini(
+  audioBase64: string,
+  mimeType: string,
+  currentSegments: string, // JSON string of current segments
+  language: string,
+  duration: number,
+  modelName: string,
+  onProgress?: (progress: RefinementProgress) => void
+): Promise<string> {
+  const ai = new GoogleGenAI({ apiKey: getEffectiveApiKey() });
+  const isThinkingModel = modelName.includes('thinking');
+
+  onProgress?.({ currentPass: 2, totalPasses: 2, status: 'Đang tinh chỉnh word-level timing...' });
+
+  const refineSystemInstruction = `Bạn là chuyên gia Karaoke Timing Validator. 
+Nhiệm vụ: Nhận kết quả timing sơ bộ và file audio gốc, rồi TINH CHỈNH cho chính xác hơn.
+
+QUY TẮC:
+1. Nghe lại audio kỹ càng và so sánh với timing hiện tại.
+2. Sửa các word duration sai lệch (từ hát nhanh nhưng duration quá dài, hoặc ngược lại).
+3. Đảm bảo tổng word durations = (end - start) * 1000 cho mỗi segment.
+4. KHÔNG thêm/bớt segment hay thay đổi text. Chỉ sửa timing.
+5. Nếu timing hiện tại đã tốt, giữ nguyên.
+6. Kết quả trả về PHẢI có cùng số lượng segments và words.`;
+
+  const refinePrompt = `Đây là kết quả timing sơ bộ. Hãy nghe lại audio và tinh chỉnh timing cho chính xác hơn.
+
+TIMING HIỆN TẠI:
+${currentSegments}
+
+Yêu cầu:
+- Nghe kỹ từng word trong audio
+- Sửa duration nếu word bị lệch
+- Giữ nguyên text và thứ tự
+- Trả về cùng format JSON`;
+
+  try {
+    const result = await ai.models.generateContent({
+      model: modelName,
+      contents: [
+        {
+          parts: [
+            { inlineData: { data: audioBase64, mimeType } },
+            { text: refinePrompt }
+          ]
+        }
+      ],
+      config: {
+        systemInstruction: refineSystemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: WORD_LEVEL_SCHEMA,
+        temperature: 0.05, // Very low for precision
+        maxOutputTokens: getMaxOutputTokens(modelName), // Pro: 128K, Flash: 64K
+        thinkingConfig: isThinkingModel ? { thinkingBudget: 2048 } : undefined
+      }
+    });
+
+    onProgress?.({ currentPass: 2, totalPasses: 2, status: 'Hoàn thành tinh chỉnh!' });
+    return result.text || currentSegments;
+  } catch (err) {
+    console.error("Refinement pass failed, using original:", err);
+    return currentSegments;
+  }
+}
+
+
+// ===== SUNO OPTIMIZER (unchanged) =====
 
 export interface SunoOptimizationResult {
   styleTags: string;
@@ -255,13 +390,12 @@ Yêu cầu trả về định dạng JSON phù hợp cấu trúc sau:
           },
           required: ["styleTags", "lyrics", "vibeDescription", "vietnameseGuide"]
         },
-        temperature: 0.7 // Hơi sáng tạo để ra phong thái nhạc sành điệu
+        temperature: 0.7
       }
     });
 
     if (response.text) {
       const data = JSON.parse(response.text.trim());
-      // Bảo đảm styleTags không dài hơn 1000 ký tự
       if (data.styleTags && data.styleTags.length > 1000) {
         data.styleTags = data.styleTags.substring(0, 997) + "...";
       }
@@ -270,7 +404,6 @@ Yêu cầu trả về định dạng JSON phù hợp cấu trúc sau:
     throw new Error("Không nhận được dữ liệu từ Gemini");
   } catch (err) {
     console.error("Error in optimizeForSuno:", err);
-    // Fallback thông minh dựa trên preferences
     const defaultStyle = [
       preferences.tempo || "110bpm",
       preferences.genre || "modern pop",

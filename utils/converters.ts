@@ -4,8 +4,6 @@ import { SubtitleSegment } from '../types';
  * Định dạng số giây thành HH:MM:SS,mmm (cho SRT)
  */
 function formatTimeSRT(seconds: number): string {
-  const date = new Date(0);
-  date.setSeconds(seconds);
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
@@ -22,6 +20,15 @@ function formatTimeASS(seconds: number): string {
   const s = Math.floor(seconds % 60);
   const cs = Math.floor((seconds % 1) * 100);
   return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`;
+}
+
+/**
+ * Định dạng số giây thành mm:ss.xx (cho LRC)
+ */
+function formatTimeLRC(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m.toString().padStart(2, '0')}:${s.toFixed(2).padStart(5, '0')}`;
 }
 
 export function parseSegmentsToSRT(segments: SubtitleSegment[]): string {
@@ -57,19 +64,115 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
   const events = segments
     .map((seg) => {
-      // ASS doesn't support our custom word timing format directly in standard players, 
-      // but we can strip it or convert to karaoke tags {\k10} later if needed.
-      // For now, just strip the custom tags for ASS to keep it clean, or keep text as is.
-      // Let's keep text as is but strip [L1] tags for display if we want, 
-      // but for now let's just use the text property.
-      // Actually, if we have words, we should probably construct the text from words 
-      // but maybe without the {500} tags for ASS unless we convert to {\k}.
-      // Let's just use the raw text for now.
       return `Dialogue: 0,${formatTimeASS(seg.start)},${formatTimeASS(seg.end)},Default,,0,0,0,,${seg.text}`;
     })
     .join('\n');
 
   return header + events;
+}
+
+// ===== MODULE 5: ASS KARAOKE TAGS EXPORT =====
+
+/**
+ * Export ASS với {\k} karaoke tags chuẩn
+ * {\k<centiseconds>} = duration of each syllable in centiseconds (1/100 s)
+ * {\kf<centiseconds>} = smooth fill effect (karaoke fill)
+ */
+export function parseSegmentsToKaraokeASS(
+  segments: SubtitleSegment[], 
+  filename: string = "Untitled",
+  useSmooth: boolean = true // \kf for smooth fill
+): string {
+  const kTag = useSmooth ? '\\kf' : '\\k';
+  
+  const header = `[Script Info]
+Title: ${filename} - Karaoke
+ScriptType: v4.00+
+Collisions: Normal
+PlayResX: 1920
+PlayResY: 1080
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Karaoke,Be Vietnam Pro,72,&H00FFFFFF,&H0010CFDF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,0,2,30,30,50,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+`;
+
+  const events = segments.map((seg) => {
+    let karaokeText: string;
+    
+    if (seg.words && seg.words.length > 0) {
+      // Convert word durations (ms) to centiseconds for ASS \k tags
+      karaokeText = seg.words.map((w, idx) => {
+        const cs = Math.round(w.duration / 10); // ms → centiseconds
+        const space = idx < seg.words!.length - 1 ? ' ' : '';
+        return `{${kTag}${cs}}${w.word}${space}`;
+      }).join('');
+    } else {
+      // Fallback: single \k tag for entire segment
+      const totalCs = Math.round((seg.end - seg.start) * 100);
+      karaokeText = `{${kTag}${totalCs}}${seg.text}`;
+    }
+    
+    return `Dialogue: 0,${formatTimeASS(seg.start)},${formatTimeASS(seg.end)},Karaoke,,0,0,0,,${karaokeText}`;
+  }).join('\n');
+
+  return header + events;
+}
+
+// ===== MODULE 5: ENHANCED LRC EXPORT =====
+
+/**
+ * Export Enhanced LRC format (lyrics file format cho karaoke players)
+ * Supports word-level timing with <word:timestamp> format
+ */
+export function parseSegmentsToLRC(
+  segments: SubtitleSegment[],
+  metadata?: { title?: string; artist?: string; album?: string }
+): string {
+  const lines: string[] = [];
+  
+  // LRC Metadata
+  if (metadata?.title) lines.push(`[ti:${metadata.title}]`);
+  if (metadata?.artist) lines.push(`[ar:${metadata.artist}]`);
+  if (metadata?.album) lines.push(`[al:${metadata.album}]`);
+  lines.push(`[by:LyricSub AI]`);
+  lines.push(`[re:LyricSub AI Karaoke Generator]`);
+  lines.push('');
+  
+  for (const seg of segments) {
+    const timestamp = `[${formatTimeLRC(seg.start)}]`;
+    
+    if (seg.words && seg.words.length > 0) {
+      // Enhanced LRC with word-level timing
+      let wordTimings = '';
+      let currentTime = seg.start;
+      
+      for (const w of seg.words) {
+        const wordTimestamp = `<${formatTimeLRC(currentTime)}>`;
+        wordTimings += `${wordTimestamp}${w.word} `;
+        currentTime += w.duration / 1000;
+      }
+      
+      lines.push(`${timestamp}${wordTimings.trim()}`);
+    } else {
+      // Simple LRC line
+      lines.push(`${timestamp}${seg.text}`);
+    }
+  }
+  
+  return lines.join('\n');
+}
+
+// ===== MODULE 5: PLAIN TEXT LYRICS EXPORT =====
+
+/**
+ * Export clean lyrics without timing (for copy/paste)
+ */
+export function parseSegmentsToPlainLyrics(segments: SubtitleSegment[]): string {
+  return segments.map(seg => seg.text).join('\n');
 }
 
 /**
@@ -85,15 +188,12 @@ export function parseSRTToSegments(srt: string): SubtitleSegment[] {
     const lines = block.split('\n');
     if (lines.length >= 3) {
       const index = parseInt(lines[0]);
-      // Regex flexible: supports comma (,) or dot (.) for milliseconds
-      // Supports loose spacing around '-->'
       const timeMatch = lines[1].match(/(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)/);
       
       if (timeMatch) {
         const start = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseInt(timeMatch[3]) + parseInt(timeMatch[4]) / 1000;
         const end = parseInt(timeMatch[5]) * 3600 + parseInt(timeMatch[6]) * 60 + parseInt(timeMatch[7]) + parseInt(timeMatch[8]) / 1000;
         
-        // Handle multi-line text block
         let text = lines.slice(2).join('\n');
         
         // Parse Line Number [L1] or [L2]
@@ -105,29 +205,23 @@ export function parseSRTToSegments(srt: string): SubtitleSegment[] {
         }
 
         // Parse Word Timings {500}
-        // Example: Hello{500} world{300}
         const words: { word: string, duration: number }[] = [];
-        // Check if text contains {number} pattern
-        if (/\{(\d+)\}/.test(text)) {
+        if (/\{\d+\}/.test(text)) {
             const parts = text.split(/(\{[^}]+\})/);
             for (let i = 0; i < parts.length; i++) {
                 const part = parts[i];
                 if (part.match(/^\{(\d+)\}$/)) {
-                    // It's a duration, assign to previous word
                     const duration = parseInt(part.match(/^\{(\d+)\}$/)![1]);
                     if (words.length > 0) {
                         words[words.length - 1].duration = duration;
                     }
                 } else if (part.trim() !== '') {
-                    // It's a word (or multiple words if no duration between them)
-                    // We might need to split by space if no duration is attached?
-                    // But the format implies Word{dur}.
-                    // Let's assume the user/system puts {dur} after every word if they use this feature.
-                    // If there are spaces, we treat them as part of the word or separate?
-                    // "Hello{500} " -> word: "Hello", dur: 500.
-                    // "Hello {500}" -> word: "Hello ", dur: 500.
-                    words.push({ word: part, duration: 0 });
+                    words.push({ word: part.trim(), duration: 0 });
                 }
+            }
+            // Clean text: remove {duration} markers for display
+            if (words.length > 0) {
+                text = words.map(w => w.word).join(' ');
             }
         }
 
@@ -144,8 +238,6 @@ export function parseSRTToSegments(srt: string): SubtitleSegment[] {
  * Hàm dịch chuyển thời gian cho cả SRT và ASS
  */
 export function shiftSubtitleTime(content: string, shiftSeconds: number): string {
-  // 1. Try to shift SRT timestamps
-  // Flexible regex for replace as well
   let newContent = content.replace(
     /(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})/g,
     (match, h1, m1, s1, ms1, h2, m2, s2, ms2) => {
@@ -159,8 +251,6 @@ export function shiftSubtitleTime(content: string, shiftSeconds: number): string
     }
   );
 
-  // 2. Try to shift ASS timestamps (if mixed or purely ASS)
-  // Pattern: 0:00:00.00 (H:MM:SS.cc)
   newContent = newContent.replace(
     /(\d+):(\d{2}):(\d{2})\.(\d{2})/g,
     (match, h, m, s, cs) => {
