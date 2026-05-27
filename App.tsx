@@ -1291,30 +1291,40 @@ const App: React.FC = () => {
 
          const segment = allSegments[activeIdx];
          if (segment) {
-             const panelH = canvas.height * 0.67; // 2/3 screen
+             const panelH = canvas.height * 0.67;
              const panelY = canvas.height - panelH;
              const padding = canvas.width * 0.06;
              const maxTextWidth = canvas.width - padding * 2;
+             const fadeIn = Math.min(1, (t - segment.start) / 0.4);
+             const easeOut = 1 - Math.pow(1 - fadeIn, 3);
 
-             // Draw dark panel background
              ctx.save();
              const panelGrad = ctx.createLinearGradient(0, panelY, 0, canvas.height);
              panelGrad.addColorStop(0, 'rgba(8, 8, 8, 0.92)');
+             panelGrad.addColorStop(0.5, 'rgba(5, 5, 5, 0.95)');
              panelGrad.addColorStop(1, 'rgba(3, 3, 3, 0.98)');
              ctx.fillStyle = panelGrad;
              ctx.fillRect(0, panelY, canvas.width, panelH);
-             // Top divider line
-             ctx.strokeStyle = karaokeColor + '60';
-             ctx.lineWidth = 2;
+             ctx.strokeStyle = karaokeColor + '80';
+             ctx.lineWidth = 2.5;
              ctx.beginPath();
-             ctx.moveTo(padding, panelY + 4);
-             ctx.lineTo(canvas.width - padding, panelY + 4);
+             ctx.moveTo(padding * 0.5, panelY + 2);
+             ctx.lineTo(canvas.width - padding * 0.5, panelY + 2);
              ctx.stroke();
              ctx.restore();
 
-             // Auto-size font to fill the panel area
+             // Segment counter
+             ctx.save();
+             ctx.font = `700 14px ${subFont.split(',')[0]}`;
+             ctx.textAlign = 'right';
+             ctx.textBaseline = 'top';
+             ctx.globalAlpha = 0.35;
+             ctx.fillStyle = 'white';
+             ctx.fillText(`${activeIdx + 1} / ${allSegments.length}`, canvas.width - padding, panelY + 14);
+             ctx.restore();
+
              const fontFamily = subFont.split(',')[0];
-             const targetLineCount = 4; // Aim for ~4 lines
+             const targetLineCount = 4;
              let scriptFontSize = Math.min(subSize * 1.5, (panelH - padding * 2) / (targetLineCount * 1.4));
              scriptFontSize = autoScaleFont(ctx, segment.text, maxTextWidth, scriptFontSize, fontFamily, '900');
              ctx.font = `900 ${scriptFontSize}px ${fontFamily}`;
@@ -1324,123 +1334,125 @@ const App: React.FC = () => {
              const totalTextH = wrappedLines.length * lineH;
              const textStartY = panelY + (panelH - totalTextH) / 2 + scriptFontSize / 2;
 
-             // Karaoke progress for the segment
-             const segDuration = segment.end - segment.start;
-             const segProgress = Math.max(0, Math.min(1, (t - segment.start) / segDuration));
-
-             // Draw text lines
              ctx.save();
              ctx.textAlign = 'left';
              ctx.textBaseline = 'middle';
+             ctx.globalAlpha = easeOut;
 
-             wrappedLines.forEach((line, i) => {
-                 const ly = textStartY + i * lineH;
-                 
-                 // Stroke
-                 ctx.lineJoin = 'round';
-                 ctx.lineWidth = scriptFontSize * 0.08;
-                 ctx.strokeStyle = 'rgba(0,0,0,0.9)';
-                 ctx.strokeText(line, padding, ly);
-                 
-                 // Fill base (dimmed white)
-                 ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-                 ctx.fillText(line, padding, ly);
-             });
-
-             // Karaoke highlight overlay - progressive reveal
              if (segment.words && segment.words.length > 0) {
-                 // Word-level: calculate total fill pixels across all wrapped lines
-                 let charIndex = 0;
+                 // Per-word highlight (works with wrapped text)
                  let accumulatedTime = 0;
-                 let totalFillPx = 0;
-                 const fullTextWidth = ctx.measureText(segment.text).width;
-
-                 segment.words.forEach((w, wIdx) => {
-                     const wordStartPx = ctx.measureText(segment.text.substring(0, charIndex)).width;
-                     const nextCharIndex = wIdx === segment.words!.length - 1 ? segment.text.length : charIndex + w.word.length + 1;
-                     const nextStartPx = ctx.measureText(segment.text.substring(0, nextCharIndex)).width;
+                 const wordStates: { word: string; highlighted: boolean; progress: number }[] = [];
+                 segment.words.forEach(w => {
                      const wDuration = w.duration / 1000;
                      const wStart = segment.start + (accumulatedTime / 1000);
                      const wEnd = wStart + wDuration;
-
-                     if (t >= wEnd) {
-                         totalFillPx = Math.max(totalFillPx, nextStartPx);
-                     } else if (t > wStart) {
-                         const ratio = (t - wStart) / wDuration;
-                         totalFillPx = Math.max(totalFillPx, wordStartPx + ratio * (nextStartPx - wordStartPx));
-                     }
-                     charIndex = nextCharIndex;
+                     let progress = 0;
+                     if (t >= wEnd) progress = 1;
+                     else if (t > wStart) progress = (t - wStart) / wDuration;
+                     wordStates.push({ word: w.word, highlighted: progress > 0, progress });
                      accumulatedTime += w.duration;
                  });
 
-                 if (totalFillPx > 0) {
-                     ctx.save();
-                     ctx.beginPath();
-                     ctx.rect(0, panelY, padding + totalFillPx, panelH);
-                     ctx.clip();
-                     wrappedLines.forEach((line, i) => {
-                         const ly = textStartY + i * lineH;
+                 let wordIdx = 0;
+                 wrappedLines.forEach((line, lineIdx) => {
+                     const ly = textStartY + lineIdx * lineH;
+                     let xCursor = padding;
+                     const lineWords = line.split(' ');
+                     lineWords.forEach((lw, lwIdx) => {
+                         if (wordIdx < wordStates.length) {
+                             const ws = wordStates[wordIdx];
+                             const wordText = lw + (lwIdx < lineWords.length - 1 ? ' ' : '');
+                             ctx.lineJoin = 'round';
+                             ctx.lineWidth = scriptFontSize * 0.07;
+                             ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+                             ctx.strokeText(wordText, xCursor, ly);
+                             if (ws.highlighted) {
+                                 ctx.shadowColor = karaokeColor;
+                                 ctx.shadowBlur = ws.progress < 1 ? 15 : 8;
+                                 ctx.fillStyle = karaokeColor;
+                             } else {
+                                 ctx.shadowBlur = 0;
+                                 ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+                             }
+                             ctx.fillText(wordText, xCursor, ly);
+                             ctx.shadowBlur = 0;
+                             xCursor += ctx.measureText(wordText).width;
+                             wordIdx++;
+                         }
+                     });
+                 });
+             } else {
+                 const segDuration = segment.end - segment.start;
+                 const segProgress = Math.max(0, Math.min(1, (t - segment.start) / segDuration));
+                 const totalChars = segment.text.length;
+                 const highlightChars = Math.floor(totalChars * segProgress);
+                 let charCount = 0;
+                 wrappedLines.forEach((line, lineIdx) => {
+                     const ly = textStartY + lineIdx * lineH;
+                     ctx.lineJoin = 'round';
+                     ctx.lineWidth = scriptFontSize * 0.07;
+                     ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+                     ctx.strokeText(line, padding, ly);
+                     const lineEnd = charCount + line.length;
+                     if (highlightChars >= lineEnd) {
                          ctx.shadowColor = karaokeColor;
-                         ctx.shadowBlur = 12;
+                         ctx.shadowBlur = 8;
                          ctx.fillStyle = karaokeColor;
                          ctx.fillText(line, padding, ly);
                          ctx.shadowBlur = 0;
-                     });
-                     ctx.restore();
-                 }
-             } else {
-                 // Segment-level fallback
-                 const fillW = wrappedLines.reduce((max, line) => Math.max(max, ctx.measureText(line).width), 0);
-                 ctx.save();
-                 ctx.beginPath();
-                 ctx.rect(0, panelY, padding + fillW * segProgress, panelH);
-                 ctx.clip();
-                 wrappedLines.forEach((line, i) => {
-                     const ly = textStartY + i * lineH;
-                     ctx.shadowColor = karaokeColor;
-                     ctx.shadowBlur = 12;
-                     ctx.fillStyle = karaokeColor;
-                     ctx.fillText(line, padding, ly);
-                     ctx.shadowBlur = 0;
+                     } else if (highlightChars > charCount) {
+                         const splitIdx = highlightChars - charCount;
+                         const hlPart = line.substring(0, splitIdx);
+                         const dimPart = line.substring(splitIdx);
+                         const hlWidth = ctx.measureText(hlPart).width;
+                         ctx.shadowColor = karaokeColor;
+                         ctx.shadowBlur = 12;
+                         ctx.fillStyle = karaokeColor;
+                         ctx.fillText(hlPart, padding, ly);
+                         ctx.shadowBlur = 0;
+                         ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+                         ctx.fillText(dimPart, padding + hlWidth, ly);
+                     } else {
+                         ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+                         ctx.fillText(line, padding, ly);
+                     }
+                     charCount += line.length + 1;
                  });
-                 ctx.restore();
              }
-
              ctx.restore();
 
-             // Show next segment preview (dimmed, below current)
              if (activeIdx < allSegments.length - 1) {
                  const nextSeg = allSegments[activeIdx + 1];
-                 const previewY = canvas.height - scriptFontSize * 0.8;
+                 const previewY = canvas.height - Math.max(16, scriptFontSize * 0.5);
                  ctx.save();
-                 ctx.font = `700 ${scriptFontSize * 0.4}px ${fontFamily}`;
+                 ctx.font = `600 ${Math.max(16, scriptFontSize * 0.35)}px ${fontFamily}`;
                  ctx.textAlign = 'right';
                  ctx.textBaseline = 'middle';
-                 ctx.globalAlpha = 0.3;
+                 ctx.globalAlpha = 0.25;
                  ctx.fillStyle = 'white';
-                 const nextPreview = nextSeg.text.length > 50 ? nextSeg.text.substring(0, 50) + '...' : nextSeg.text;
+                 const nextPreview = nextSeg.text.length > 60 ? nextSeg.text.substring(0, 60) + '…' : nextSeg.text;
                  ctx.fillText('▸ ' + nextPreview, canvas.width - padding, previewY);
                  ctx.restore();
              }
          }
       } else if (displayMode === DisplayMode.NEWS_TICKER) {
-         // --- NEWS TICKER MODE (Slow vertical scroll of wrapped text blocks) ---
+         // --- NEWS TICKER MODE (Slow vertical scroll with wrapped text) ---
          const allSegments = parsedSegmentsRef.current;
          const fontFamily = subFont.split(',')[0];
          const tickerFontSize = Math.min(subSize, 56);
          const maxW = canvas.width * 0.85;
          const padding = canvas.width * 0.075;
-
-         // Draw ticker background bar (bottom 30%)
          const barH = canvas.height * 0.30;
          const barY = canvas.height - barH;
+
          ctx.save();
-         const barGrad = ctx.createLinearGradient(0, barY, 0, canvas.height);
-         barGrad.addColorStop(0, 'rgba(6, 6, 6, 0.90)');
+         const barGrad = ctx.createLinearGradient(0, barY - 20, 0, canvas.height);
+         barGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+         barGrad.addColorStop(0.06, 'rgba(6, 6, 6, 0.90)');
          barGrad.addColorStop(1, 'rgba(2, 2, 2, 0.98)');
          ctx.fillStyle = barGrad;
-         ctx.fillRect(0, barY, canvas.width, barH);
-         // Top accent line
+         ctx.fillRect(0, barY - 20, canvas.width, barH + 20);
          ctx.strokeStyle = karaokeColor;
          ctx.lineWidth = 3;
          ctx.beginPath();
@@ -1449,7 +1461,6 @@ const App: React.FC = () => {
          ctx.stroke();
          ctx.restore();
 
-         // Find relevant segments (current + a few around)
          let activeIdx = allSegments.findIndex(s => t >= s.start && t <= s.end);
          if (activeIdx === -1) {
              activeIdx = allSegments.findIndex(s => t < s.start);
@@ -1457,36 +1468,27 @@ const App: React.FC = () => {
              else if (activeIdx > 0) activeIdx -= 1;
          }
 
-         // Calculate scroll - smooth vertical crawl (reading speed ~150 WPM)
-         const readingSpeedPxPerSec = tickerFontSize * 0.8; // Pixels per second
          const lineH = tickerFontSize * 1.5;
-
-         // Accumulate line heights for all segments up to current
+         const segGap = lineH * 0.6;
          let totalScrollOffset = 0;
+         ctx.font = `900 ${tickerFontSize}px ${fontFamily}`;
          for (let i = 0; i < activeIdx; i++) {
-             ctx.font = `900 ${tickerFontSize}px ${fontFamily}`;
              const lines = wrapText(ctx, allSegments[i].text, maxW);
-             totalScrollOffset += lines.length * lineH + lineH * 0.5; // gap between segments
+             totalScrollOffset += lines.length * lineH + segGap;
          }
-
-         // Add progress within current segment
          if (allSegments[activeIdx]) {
              const seg = allSegments[activeIdx];
-             const segProgress = Math.max(0, Math.min(1, (t - seg.start) / (seg.end - seg.start)));
-             ctx.font = `900 ${tickerFontSize}px ${fontFamily}`;
+             const rawP = Math.max(0, Math.min(1, (t - seg.start) / (seg.end - seg.start)));
+             const easedP = rawP < 0.5 ? 2 * rawP * rawP : 1 - Math.pow(-2 * rawP + 2, 2) / 2;
              const currentLines = wrapText(ctx, seg.text, maxW);
-             totalScrollOffset += segProgress * (currentLines.length * lineH);
+             totalScrollOffset += easedP * (currentLines.length * lineH * 0.3);
          }
 
-         // Draw scrolling text within clipped bar area
          ctx.save();
          ctx.beginPath();
-         ctx.rect(0, barY + 8, canvas.width, barH - 8);
+         ctx.rect(0, barY + 6, canvas.width, barH - 6);
          ctx.clip();
-
-         const anchorY = barY + barH * 0.5; // Center of bar
-         let drawY = anchorY - totalScrollOffset;
-
+         let drawY = barY + barH * 0.4 - totalScrollOffset;
          ctx.font = `900 ${tickerFontSize}px ${fontFamily}`;
          ctx.textAlign = 'left';
          ctx.textBaseline = 'middle';
@@ -1496,33 +1498,37 @@ const App: React.FC = () => {
              const lines = wrapText(ctx, seg.text, maxW);
              const isActive = (i === activeIdx);
              const isPast = (t > seg.end);
-
              lines.forEach((line, li) => {
                  const ly = drawY + li * lineH;
                  if (ly > barY - lineH && ly < canvas.height + lineH) {
-                     // Stroke
                      ctx.lineJoin = 'round';
-                     ctx.lineWidth = tickerFontSize * 0.08;
+                     ctx.lineWidth = tickerFontSize * 0.07;
                      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
                      ctx.strokeText(line, padding, ly);
-
-                     // Fill
                      if (isActive) {
                          ctx.shadowColor = karaokeColor;
                          ctx.shadowBlur = 10;
                          ctx.fillStyle = karaokeColor;
                      } else if (isPast) {
                          ctx.shadowBlur = 0;
-                         ctx.fillStyle = 'rgba(255,255,255,0.35)';
+                         ctx.fillStyle = 'rgba(255,255,255,0.3)';
                      } else {
                          ctx.shadowBlur = 0;
-                         ctx.fillStyle = 'rgba(255,255,255,0.65)';
+                         ctx.fillStyle = 'rgba(255,255,255,0.6)';
                      }
                      ctx.fillText(line, padding, ly);
                      ctx.shadowBlur = 0;
                  }
              });
-             drawY += lines.length * lineH + lineH * 0.5;
+             drawY += lines.length * lineH;
+             const dotY = drawY + segGap * 0.5;
+             if (dotY > barY && dotY < canvas.height) {
+                 ctx.globalAlpha = 0.15;
+                 ctx.fillStyle = 'white';
+                 ctx.fillText('•', canvas.width / 2 - 4, dotY);
+                 ctx.globalAlpha = 1;
+             }
+             drawY += segGap;
          }
          ctx.restore();
 
