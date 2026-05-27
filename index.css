@@ -61,3 +61,16 @@ body.dialog-open {
   background: rgba(223, 156, 16, 0.3);
   color: inherit;
 }
+
+/* Transparency checkerboard background for the video player container */
+.transparency-checkered {
+  background-color: #1e293b !important; /* Dark Slate background */
+  background-image: 
+    linear-gradient(45deg, #0f172a 25%, transparent 25%), 
+    linear-gradient(-45deg, #0f172a 25%, transparent 25%), 
+    linear-gradient(45deg, transparent 75%, #0f172a 75%), 
+    linear-gradient(-45deg, transparent 75%, #0f172a 75%) !important;
+  background-size: 20px 20px !important;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0px !important;
+}
+

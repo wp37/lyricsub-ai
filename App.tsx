@@ -941,8 +941,16 @@ const App: React.FC = () => {
     analyzer.getByteFrequencyData(dataArray);
 
     // 1. Background
-    ctx.fillStyle = bgColor;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    if (bgType === 'color') {
+      if (bgColor === 'transparent') {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      } else {
+        ctx.fillStyle = bgColor;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+    } else {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
 
     if (bgType === 'image' && bgImageObjsRef.current.length > 0) {
       const imgs = bgImageObjsRef.current;
@@ -1299,13 +1307,20 @@ const App: React.FC = () => {
              const easeOut = 1 - Math.pow(1 - fadeIn, 3);
 
              ctx.save();
+             const isBgTransparent = (bgType === 'color' && bgColor === 'transparent');
              const panelGrad = ctx.createLinearGradient(0, panelY, 0, canvas.height);
-             panelGrad.addColorStop(0, 'rgba(8, 8, 8, 0.92)');
-             panelGrad.addColorStop(0.5, 'rgba(5, 5, 5, 0.95)');
-             panelGrad.addColorStop(1, 'rgba(3, 3, 3, 0.98)');
+             if (isBgTransparent) {
+                 panelGrad.addColorStop(0, 'rgba(0, 0, 0, 0.0)');
+                 panelGrad.addColorStop(0.5, 'rgba(0, 0, 0, 0.15)');
+                 panelGrad.addColorStop(1, 'rgba(0, 0, 0, 0.35)');
+             } else {
+                 panelGrad.addColorStop(0, 'rgba(8, 8, 8, 0.92)');
+                 panelGrad.addColorStop(0.5, 'rgba(5, 5, 5, 0.95)');
+                 panelGrad.addColorStop(1, 'rgba(3, 3, 3, 0.98)');
+             }
              ctx.fillStyle = panelGrad;
              ctx.fillRect(0, panelY, canvas.width, panelH);
-             ctx.strokeStyle = karaokeColor + '80';
+             ctx.strokeStyle = isBgTransparent ? 'rgba(255, 255, 255, 0.08)' : karaokeColor + '80';
              ctx.lineWidth = 2.5;
              ctx.beginPath();
              ctx.moveTo(padding * 0.5, panelY + 2);
@@ -1447,13 +1462,20 @@ const App: React.FC = () => {
          const barY = canvas.height - barH;
 
          ctx.save();
+         const isBgTransparent = (bgType === 'color' && bgColor === 'transparent');
          const barGrad = ctx.createLinearGradient(0, barY - 20, 0, canvas.height);
-         barGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
-         barGrad.addColorStop(0.06, 'rgba(6, 6, 6, 0.90)');
-         barGrad.addColorStop(1, 'rgba(2, 2, 2, 0.98)');
+         if (isBgTransparent) {
+             barGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+             barGrad.addColorStop(0.06, 'rgba(0, 0, 0, 0.12)');
+             barGrad.addColorStop(1, 'rgba(0, 0, 0, 0.30)');
+         } else {
+             barGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+             barGrad.addColorStop(0.06, 'rgba(6, 6, 6, 0.90)');
+             barGrad.addColorStop(1, 'rgba(2, 2, 2, 0.98)');
+         }
          ctx.fillStyle = barGrad;
          ctx.fillRect(0, barY - 20, canvas.width, barH + 20);
-         ctx.strokeStyle = karaokeColor;
+         ctx.strokeStyle = isBgTransparent ? 'rgba(255, 255, 255, 0.08)' : karaokeColor;
          ctx.lineWidth = 3;
          ctx.beginPath();
          ctx.moveTo(0, barY);
@@ -1541,15 +1563,21 @@ const App: React.FC = () => {
          // Render Split Screen, Left or Right background once if active
          if ((displayMode === DisplayMode.SPLIT_SCREEN || displayMode === DisplayMode.SPLIT_LEFT || displayMode === DisplayMode.SPLIT_RIGHT) && visibleSegments.length > 0) {
               ctx.save();
+              const isBgTransparent = (bgType === 'color' && bgColor === 'transparent');
               if (displayMode === DisplayMode.SPLIT_SCREEN) {
                   const panelH = canvas.height * 0.35;
                   const panelY = canvas.height - panelH;
                   const panelGrad = ctx.createLinearGradient(0, panelY, 0, canvas.height);
-                  panelGrad.addColorStop(0, 'rgba(10, 10, 10, 0.85)');
-                  panelGrad.addColorStop(1, 'rgba(3, 3, 3, 0.98)');
+                  if (isBgTransparent) {
+                      panelGrad.addColorStop(0, 'rgba(0, 0, 0, 0.0)');
+                      panelGrad.addColorStop(1, 'rgba(0, 0, 0, 0.30)');
+                  } else {
+                      panelGrad.addColorStop(0, 'rgba(10, 10, 10, 0.85)');
+                      panelGrad.addColorStop(1, 'rgba(3, 3, 3, 0.98)');
+                  }
                   ctx.fillStyle = panelGrad;
                   ctx.fillRect(0, panelY, canvas.width, panelH);
-                  ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+                  ctx.strokeStyle = isBgTransparent ? 'rgba(255, 255, 255, 0.08)' : 'rgba(255, 255, 255, 0.12)';
                   ctx.lineWidth = 1.5;
                   ctx.beginPath();
                   ctx.moveTo(0, panelY);
@@ -1559,11 +1587,16 @@ const App: React.FC = () => {
                   const panelW = canvas.width * 0.5;
                   const panelX = displayMode === DisplayMode.SPLIT_LEFT ? 0 : canvas.width * 0.5;
                   const panelGrad = ctx.createLinearGradient(panelX, 0, panelX + panelW, 0);
-                  panelGrad.addColorStop(0, 'rgba(12, 12, 12, 0.85)');
-                  panelGrad.addColorStop(1, 'rgba(6, 6, 6, 0.96)');
+                  if (isBgTransparent) {
+                      panelGrad.addColorStop(0, 'rgba(0, 0, 0, 0.0)');
+                      panelGrad.addColorStop(1, 'rgba(0, 0, 0, 0.25)');
+                  } else {
+                      panelGrad.addColorStop(0, 'rgba(12, 12, 12, 0.85)');
+                      panelGrad.addColorStop(1, 'rgba(6, 6, 6, 0.96)');
+                  }
                   ctx.fillStyle = panelGrad;
                   ctx.fillRect(panelX, 0, panelW, canvas.height);
-                  ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+                  ctx.strokeStyle = isBgTransparent ? 'rgba(255, 255, 255, 0.08)' : 'rgba(255, 255, 255, 0.15)';
                   ctx.lineWidth = 1.5;
                   ctx.beginPath();
                   const dividerX = displayMode === DisplayMode.SPLIT_LEFT ? panelW : panelX;
@@ -2188,13 +2221,22 @@ const App: React.FC = () => {
         const canvasStream = canvasRef.current.captureStream(0); // 0 FPS = Manual capture mode, vital for background export
         const combinedStream = new MediaStream([...canvasStream.getVideoTracks(), ...dest.stream.getAudioTracks()]);
         
-        const mimeTypes = [
+        let mimeTypes = [
           'video/mp4;codecs=h264',
           'video/mp4',
-          'video/webm;codecs=h264',
+          'video/webm;codecs=vp9',
           'video/webm;codecs=vp8',
           'video/webm'
         ];
+        
+        // Nếu chọn nền trong suốt, ép hệ thống sử dụng WebM (VP9/VP8) hỗ trợ kênh alpha
+        if (bgType === 'color' && bgColor === 'transparent') {
+          mimeTypes = [
+            'video/webm;codecs=vp9',
+            'video/webm;codecs=vp8',
+            'video/webm'
+          ];
+        }
         const selectedMime = mimeTypes.find(type => MediaRecorder.isTypeSupported(type)) || 'video/webm';
         const isMp4 = selectedMime.includes('mp4');
         const ext = isMp4 ? '.mp4' : '.webm';
@@ -2287,13 +2329,22 @@ const App: React.FC = () => {
     const canvasStream = canvasRef.current.captureStream(30);
     const audioStream = audioDestRef.current.stream;
     const combinedStream = new MediaStream([...canvasStream.getVideoTracks(), ...audioStream.getAudioTracks()]);
-    const mimeTypes = [
+    let mimeTypes = [
       'video/mp4;codecs=h264',
       'video/mp4',
-      'video/webm;codecs=h264',
+      'video/webm;codecs=vp9',
       'video/webm;codecs=vp8',
       'video/webm'
     ];
+    
+    // Nếu chọn nền trong suốt, ép hệ thống sử dụng WebM (VP9/VP8) hỗ trợ kênh alpha
+    if (bgType === 'color' && bgColor === 'transparent') {
+      mimeTypes = [
+        'video/webm;codecs=vp9',
+        'video/webm;codecs=vp8',
+        'video/webm'
+      ];
+    }
     const selectedMime = mimeTypes.find(type => MediaRecorder.isTypeSupported(type)) || 'video/webm';
     const isMp4 = selectedMime.includes('mp4');
     const ext = isMp4 ? '.mp4' : '.webm';
@@ -3102,9 +3153,38 @@ const App: React.FC = () => {
                         <button onClick={() => setBgType('image')} className={`text-[9px] px-2 py-1 rounded transition-colors ${bgType === 'image' ? 'bg-indigo-500 text-white' : 'hover:bg-slate-100 dark:hover:bg-slate-700'}`}>Ảnh ({bgImages.length})</button>
                         <button onClick={() => setBgType('video')} className={`text-[9px] px-2 py-1 rounded transition-colors ${bgType === 'video' ? 'bg-indigo-500 text-white' : 'hover:bg-slate-100 dark:hover:bg-slate-700'}`}>Video ({bgVideos.length})</button>
                         
-                        {bgType === 'color' && 
-                           <input type="color" value={bgColor} onChange={(e) => setBgColor(e.target.value)} className="w-4 h-4 bg-transparent border-none p-0 cursor-pointer" /> 
-                        }
+                        {bgType === 'color' && (
+                           <div className="flex items-center gap-1.5 ml-1 animate-in fade-in zoom-in-95 duration-200">
+                             <input 
+                               type="color" 
+                               value={bgColor === 'transparent' ? '#000000' : bgColor} 
+                               onChange={(e) => setBgColor(e.target.value)} 
+                               className="w-4 h-4 bg-transparent border-none p-0 cursor-pointer shrink-0" 
+                               title="Chọn màu tự do"
+                             />
+                             <button 
+                               onClick={() => setBgColor('#0b0a09')} 
+                               className={`text-[8px] px-1.5 py-0.5 rounded flex items-center gap-1 font-bold ${bgColor === '#0b0a09' ? 'bg-slate-800 text-white ring-1 ring-slate-400' : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300'}`}
+                               title="Nền đen Velvet (Dễ hòa trộn Screen trong CapCut)"
+                             >
+                               <span className="w-1.5 h-1.5 rounded-full bg-[#0b0a09] border border-white/20" /> Nền Đen
+                             </button>
+                             <button 
+                               onClick={() => setBgColor('#00ff00')} 
+                               className={`text-[8px] px-1.5 py-0.5 rounded flex items-center gap-1 font-bold ${bgColor === '#00ff00' ? 'bg-emerald-600 text-white ring-1 ring-emerald-400' : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300'}`}
+                               title="Nền xanh lá (Dễ dùng Chroma Key lọc nền trong CapCut)"
+                             >
+                               <span className="w-1.5 h-1.5 rounded-full bg-[#00ff00]" /> Phông Xanh
+                             </button>
+                             <button 
+                               onClick={() => setBgColor('transparent')} 
+                               className={`text-[8px] px-1.5 py-0.5 rounded flex items-center gap-1 font-bold ${bgColor === 'transparent' ? 'bg-indigo-600 text-white ring-1 ring-indigo-400' : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300'}`}
+                               title="Nền trong suốt hoàn toàn (Chỉ WebM - Kéo thả dùng trực tiếp không cần lọc nền)"
+                             >
+                               <span className="w-1.5 h-1.5 rounded-full border border-dashed border-indigo-400" /> Trong Suốt
+                             </button>
+                           </div>
+                        )}
                         {bgType === 'image' && (
                            <div className="flex items-center gap-1">
                              <button onClick={() => bgInputRef.current?.click()} className="hover:text-indigo-500 text-[8px] bg-slate-200 dark:bg-slate-700 px-1 rounded flex items-center gap-1"><ImageIcon className="w-2 h-2" /> Thêm</button>
@@ -3632,7 +3712,7 @@ const App: React.FC = () => {
 
                   {/* PLAYER CONTAINER: Aspect Ratio enforced via JS/Tailwind */}
                   <div className="flex justify-center bg-black/5 dark:bg-black/40 rounded-[32px] p-4">
-                      <div ref={playerContainerRef} className={`relative overflow-hidden shadow-2xl flex flex-col items-center justify-center transition-all duration-500 border border-white/10 group bg-black ${aspectRatio === '16:9' ? 'aspect-video w-full' : 'aspect-[9/16] h-[600px]'}`}>
+                      <div ref={playerContainerRef} className={`relative overflow-hidden shadow-2xl flex flex-col items-center justify-center transition-all duration-500 border border-white/10 group ${bgType === 'color' && bgColor === 'transparent' ? 'transparency-checkered' : 'bg-black'} ${aspectRatio === '16:9' ? 'aspect-video w-full' : 'aspect-[9/16] h-[600px]'}`}>
                         {/* Width/Height dynamic based on ratio */}
                         <canvas ref={canvasRef} width={aspectRatio === '16:9' ? 1920 : 1080} height={aspectRatio === '16:9' ? 1080 : 1920} className="w-full h-full object-contain cursor-none" />
                         {isRecording && (
