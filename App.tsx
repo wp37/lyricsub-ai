@@ -1279,6 +1279,253 @@ const App: React.FC = () => {
 
              ctx.restore();
          }
+      } else if (displayMode === DisplayMode.SCRIPT) {
+         // --- SCRIPT MODE (Large Text 2/3 Screen - for News/Education) ---
+         const allSegments = parsedSegmentsRef.current;
+         let activeIdx = allSegments.findIndex(s => t >= s.start && t <= s.end);
+         if (activeIdx === -1) {
+             activeIdx = allSegments.findIndex(s => t < s.start);
+             if (activeIdx === -1) activeIdx = allSegments.length - 1;
+             else if (activeIdx > 0) activeIdx -= 1;
+         }
+
+         const segment = allSegments[activeIdx];
+         if (segment) {
+             const panelH = canvas.height * 0.67; // 2/3 screen
+             const panelY = canvas.height - panelH;
+             const padding = canvas.width * 0.06;
+             const maxTextWidth = canvas.width - padding * 2;
+
+             // Draw dark panel background
+             ctx.save();
+             const panelGrad = ctx.createLinearGradient(0, panelY, 0, canvas.height);
+             panelGrad.addColorStop(0, 'rgba(8, 8, 8, 0.92)');
+             panelGrad.addColorStop(1, 'rgba(3, 3, 3, 0.98)');
+             ctx.fillStyle = panelGrad;
+             ctx.fillRect(0, panelY, canvas.width, panelH);
+             // Top divider line
+             ctx.strokeStyle = karaokeColor + '60';
+             ctx.lineWidth = 2;
+             ctx.beginPath();
+             ctx.moveTo(padding, panelY + 4);
+             ctx.lineTo(canvas.width - padding, panelY + 4);
+             ctx.stroke();
+             ctx.restore();
+
+             // Auto-size font to fill the panel area
+             const fontFamily = subFont.split(',')[0];
+             const targetLineCount = 4; // Aim for ~4 lines
+             let scriptFontSize = Math.min(subSize * 1.5, (panelH - padding * 2) / (targetLineCount * 1.4));
+             scriptFontSize = autoScaleFont(ctx, segment.text, maxTextWidth, scriptFontSize, fontFamily, '900');
+             ctx.font = `900 ${scriptFontSize}px ${fontFamily}`;
+
+             const wrappedLines = wrapText(ctx, segment.text, maxTextWidth);
+             const lineH = scriptFontSize * 1.4;
+             const totalTextH = wrappedLines.length * lineH;
+             const textStartY = panelY + (panelH - totalTextH) / 2 + scriptFontSize / 2;
+
+             // Karaoke progress for the segment
+             const segDuration = segment.end - segment.start;
+             const segProgress = Math.max(0, Math.min(1, (t - segment.start) / segDuration));
+
+             // Draw text lines
+             ctx.save();
+             ctx.textAlign = 'left';
+             ctx.textBaseline = 'middle';
+
+             wrappedLines.forEach((line, i) => {
+                 const ly = textStartY + i * lineH;
+                 
+                 // Stroke
+                 ctx.lineJoin = 'round';
+                 ctx.lineWidth = scriptFontSize * 0.08;
+                 ctx.strokeStyle = 'rgba(0,0,0,0.9)';
+                 ctx.strokeText(line, padding, ly);
+                 
+                 // Fill base (dimmed white)
+                 ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+                 ctx.fillText(line, padding, ly);
+             });
+
+             // Karaoke highlight overlay - progressive reveal
+             if (segment.words && segment.words.length > 0) {
+                 // Word-level: calculate total fill pixels across all wrapped lines
+                 let charIndex = 0;
+                 let accumulatedTime = 0;
+                 let totalFillPx = 0;
+                 const fullTextWidth = ctx.measureText(segment.text).width;
+
+                 segment.words.forEach((w, wIdx) => {
+                     const wordStartPx = ctx.measureText(segment.text.substring(0, charIndex)).width;
+                     const nextCharIndex = wIdx === segment.words!.length - 1 ? segment.text.length : charIndex + w.word.length + 1;
+                     const nextStartPx = ctx.measureText(segment.text.substring(0, nextCharIndex)).width;
+                     const wDuration = w.duration / 1000;
+                     const wStart = segment.start + (accumulatedTime / 1000);
+                     const wEnd = wStart + wDuration;
+
+                     if (t >= wEnd) {
+                         totalFillPx = Math.max(totalFillPx, nextStartPx);
+                     } else if (t > wStart) {
+                         const ratio = (t - wStart) / wDuration;
+                         totalFillPx = Math.max(totalFillPx, wordStartPx + ratio * (nextStartPx - wordStartPx));
+                     }
+                     charIndex = nextCharIndex;
+                     accumulatedTime += w.duration;
+                 });
+
+                 if (totalFillPx > 0) {
+                     ctx.save();
+                     ctx.beginPath();
+                     ctx.rect(0, panelY, padding + totalFillPx, panelH);
+                     ctx.clip();
+                     wrappedLines.forEach((line, i) => {
+                         const ly = textStartY + i * lineH;
+                         ctx.shadowColor = karaokeColor;
+                         ctx.shadowBlur = 12;
+                         ctx.fillStyle = karaokeColor;
+                         ctx.fillText(line, padding, ly);
+                         ctx.shadowBlur = 0;
+                     });
+                     ctx.restore();
+                 }
+             } else {
+                 // Segment-level fallback
+                 const fillW = wrappedLines.reduce((max, line) => Math.max(max, ctx.measureText(line).width), 0);
+                 ctx.save();
+                 ctx.beginPath();
+                 ctx.rect(0, panelY, padding + fillW * segProgress, panelH);
+                 ctx.clip();
+                 wrappedLines.forEach((line, i) => {
+                     const ly = textStartY + i * lineH;
+                     ctx.shadowColor = karaokeColor;
+                     ctx.shadowBlur = 12;
+                     ctx.fillStyle = karaokeColor;
+                     ctx.fillText(line, padding, ly);
+                     ctx.shadowBlur = 0;
+                 });
+                 ctx.restore();
+             }
+
+             ctx.restore();
+
+             // Show next segment preview (dimmed, below current)
+             if (activeIdx < allSegments.length - 1) {
+                 const nextSeg = allSegments[activeIdx + 1];
+                 const previewY = canvas.height - scriptFontSize * 0.8;
+                 ctx.save();
+                 ctx.font = `700 ${scriptFontSize * 0.4}px ${fontFamily}`;
+                 ctx.textAlign = 'right';
+                 ctx.textBaseline = 'middle';
+                 ctx.globalAlpha = 0.3;
+                 ctx.fillStyle = 'white';
+                 const nextPreview = nextSeg.text.length > 50 ? nextSeg.text.substring(0, 50) + '...' : nextSeg.text;
+                 ctx.fillText('▸ ' + nextPreview, canvas.width - padding, previewY);
+                 ctx.restore();
+             }
+         }
+      } else if (displayMode === DisplayMode.NEWS_TICKER) {
+         // --- NEWS TICKER MODE (Slow vertical scroll of wrapped text blocks) ---
+         const allSegments = parsedSegmentsRef.current;
+         const fontFamily = subFont.split(',')[0];
+         const tickerFontSize = Math.min(subSize, 56);
+         const maxW = canvas.width * 0.85;
+         const padding = canvas.width * 0.075;
+
+         // Draw ticker background bar (bottom 30%)
+         const barH = canvas.height * 0.30;
+         const barY = canvas.height - barH;
+         ctx.save();
+         const barGrad = ctx.createLinearGradient(0, barY, 0, canvas.height);
+         barGrad.addColorStop(0, 'rgba(6, 6, 6, 0.90)');
+         barGrad.addColorStop(1, 'rgba(2, 2, 2, 0.98)');
+         ctx.fillStyle = barGrad;
+         ctx.fillRect(0, barY, canvas.width, barH);
+         // Top accent line
+         ctx.strokeStyle = karaokeColor;
+         ctx.lineWidth = 3;
+         ctx.beginPath();
+         ctx.moveTo(0, barY);
+         ctx.lineTo(canvas.width, barY);
+         ctx.stroke();
+         ctx.restore();
+
+         // Find relevant segments (current + a few around)
+         let activeIdx = allSegments.findIndex(s => t >= s.start && t <= s.end);
+         if (activeIdx === -1) {
+             activeIdx = allSegments.findIndex(s => t < s.start);
+             if (activeIdx === -1) activeIdx = allSegments.length - 1;
+             else if (activeIdx > 0) activeIdx -= 1;
+         }
+
+         // Calculate scroll - smooth vertical crawl (reading speed ~150 WPM)
+         const readingSpeedPxPerSec = tickerFontSize * 0.8; // Pixels per second
+         const lineH = tickerFontSize * 1.5;
+
+         // Accumulate line heights for all segments up to current
+         let totalScrollOffset = 0;
+         for (let i = 0; i < activeIdx; i++) {
+             ctx.font = `900 ${tickerFontSize}px ${fontFamily}`;
+             const lines = wrapText(ctx, allSegments[i].text, maxW);
+             totalScrollOffset += lines.length * lineH + lineH * 0.5; // gap between segments
+         }
+
+         // Add progress within current segment
+         if (allSegments[activeIdx]) {
+             const seg = allSegments[activeIdx];
+             const segProgress = Math.max(0, Math.min(1, (t - seg.start) / (seg.end - seg.start)));
+             ctx.font = `900 ${tickerFontSize}px ${fontFamily}`;
+             const currentLines = wrapText(ctx, seg.text, maxW);
+             totalScrollOffset += segProgress * (currentLines.length * lineH);
+         }
+
+         // Draw scrolling text within clipped bar area
+         ctx.save();
+         ctx.beginPath();
+         ctx.rect(0, barY + 8, canvas.width, barH - 8);
+         ctx.clip();
+
+         const anchorY = barY + barH * 0.5; // Center of bar
+         let drawY = anchorY - totalScrollOffset;
+
+         ctx.font = `900 ${tickerFontSize}px ${fontFamily}`;
+         ctx.textAlign = 'left';
+         ctx.textBaseline = 'middle';
+
+         for (let i = 0; i < allSegments.length; i++) {
+             const seg = allSegments[i];
+             const lines = wrapText(ctx, seg.text, maxW);
+             const isActive = (i === activeIdx);
+             const isPast = (t > seg.end);
+
+             lines.forEach((line, li) => {
+                 const ly = drawY + li * lineH;
+                 if (ly > barY - lineH && ly < canvas.height + lineH) {
+                     // Stroke
+                     ctx.lineJoin = 'round';
+                     ctx.lineWidth = tickerFontSize * 0.08;
+                     ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+                     ctx.strokeText(line, padding, ly);
+
+                     // Fill
+                     if (isActive) {
+                         ctx.shadowColor = karaokeColor;
+                         ctx.shadowBlur = 10;
+                         ctx.fillStyle = karaokeColor;
+                     } else if (isPast) {
+                         ctx.shadowBlur = 0;
+                         ctx.fillStyle = 'rgba(255,255,255,0.35)';
+                     } else {
+                         ctx.shadowBlur = 0;
+                         ctx.fillStyle = 'rgba(255,255,255,0.65)';
+                     }
+                     ctx.fillText(line, padding, ly);
+                     ctx.shadowBlur = 0;
+                 }
+             });
+             drawY += lines.length * lineH + lineH * 0.5;
+         }
+         ctx.restore();
+
       } else {
          // --- STANDARD SEGMENT-BASED DRAWING (KARAOKE, TEXT OVERLAY, MARQUEE, SPLIT SCREEN) ---
          const visibleSegments = parsedSegmentsRef.current.filter(s => 
@@ -1414,10 +1661,16 @@ const App: React.FC = () => {
               if (align === 'center') startX = baseX - totalWidth / 2;
               else if (align === 'right') startX = baseX - totalWidth;
 
-              // If Marquee mode, calculate scrolling startX
+              // If Marquee mode, calculate scrolling startX (reading-speed pacing)
               if (displayMode === DisplayMode.MARQUEE) {
-                  const duration = segment.end - segment.start;
-                  const progress = Math.max(0, Math.min(1, (t - segment.start) / duration));
+                  const segDuration = segment.end - segment.start;
+                  // Reading-speed: ~200 WPM → ~3.3 words/sec → scroll speed proportional to text length
+                  const wordCount = segment.text.split(' ').length;
+                  const readingTime = Math.max(3, wordCount / 3.3); // Min 3 seconds
+                  // Use the LONGER of segment duration or reading time
+                  const scrollDuration = Math.max(segDuration, readingTime);
+                  const elapsed = t - segment.start;
+                  const progress = Math.max(0, Math.min(1, elapsed / scrollDuration));
                   startX = canvas.width - progress * (canvas.width + totalWidth);
                   baseX = startX; // We draw text at startX since align is left
                   
@@ -3124,6 +3377,8 @@ const App: React.FC = () => {
                                 <option value={DisplayMode.TELEPROMPTER}>📜 Teleprompter (Chạy dọc)</option>
                                 <option value={DisplayMode.SPLIT_LEFT}>🚪 Split Left (1/2 bên trái)</option>
                                 <option value={DisplayMode.SPLIT_RIGHT}>🚪 Split Right (1/2 bên phải)</option>
+                                <option value={DisplayMode.SCRIPT}>📰 Script (2/3 màn hình - Bản tin/Dạy học)</option>
+                                <option value={DisplayMode.NEWS_TICKER}>📺 News Ticker (Chạy dọc chậm)</option>
                             </select>
                         </div>
                         

@@ -99,7 +99,9 @@ export enum DisplayMode {
   SPLIT_SCREEN = 'Split Screen',
   TELEPROMPTER = 'Teleprompter',
   SPLIT_LEFT = 'Split Left',
-  SPLIT_RIGHT = 'Split Right'
+  SPLIT_RIGHT = 'Split Right',
+  SCRIPT = 'Script',
+  NEWS_TICKER = 'News Ticker'
 }
 
 export enum CornerPosition {
